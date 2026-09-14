@@ -88,7 +88,7 @@ third-party font file.
 3. Build/run:
 
 ```bat
-set JAVA_HOME=C:\Users\Nanako\AppData\Roaming\PrismLauncher\java\java-runtime-epsilon
+set JAVA_HOME=C:\Users\<user>\AppData\Roaming\PrismLauncher\java\java-runtime-epsilon
 set PATH=%JAVA_HOME%\bin;%PATH%
 gradlew.bat runClient
 ```
