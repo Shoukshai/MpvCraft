@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "${mod_id}",
+  "version": "${mod_version}",
+  "name": "${mod_name}",
+  "description": "${mod_description}",
+  "authors": ["Shouk"],
+  "license": "BSD-3-Clause",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      {
+        "adapter": "kotlin",
+        "value": "moe.rakka.mpvcraft.MpvCraft"
+      }
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": ">=${fabric_api_version}",
+    "minecraft": "${minecraft_version_range}",
+    "fabric-language-kotlin": ">=${fabric_kotlin_version}"
+  },
+  "accessWidener": "mpvcraft.accesswidener"
+}
