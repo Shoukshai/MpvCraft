@@ -4,6 +4,16 @@ MpvCraft embeds **libmpv** as a movable media player inside Minecraft using Fabr
 The video surface, subtitle layer and control UI are rendered in-game without vanilla
 Minecraft widgets.
 
+## Screenshots
+
+### Control menu
+
+![MpvCraft control menu](images/menu.png)
+
+### HUD layout editor
+
+![MpvCraft HUD layout editor](images/hud.png)
+
 ## Features
 
 - Local files and direct media URLs through libmpv.
