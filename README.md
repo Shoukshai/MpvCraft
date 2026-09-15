@@ -60,6 +60,14 @@ JNA is bundled with MpvCraft and does **not** need to be installed separately.
 
 # Installation
 
+## Video installation guide
+
+Prefer a video walkthrough? This guide covers the complete MpvCraft installation, including Fabric dependencies, libmpv setup, and the first launch.
+
+[![MpvCraft Installation & Setup Guide](https://img.youtube.com/vi/bT_kmIrsdoQ/maxresdefault.jpg)](https://youtu.be/bT_kmIrsdoQ)
+
+**Watch on YouTube:** https://youtu.be/bT_kmIrsdoQ
+
 ## 1. Install Fabric
 
 Install Fabric Loader for Minecraft 26.1.x, then add these mods to your instance's `mods` folder:
