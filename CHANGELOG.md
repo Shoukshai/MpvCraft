@@ -28,6 +28,8 @@ MpvCraft is currently in alpha. Features listed under **Unreleased / Upcoming** 
   - Allow adding subtitles even when the current media already contains embedded subtitle tracks.
   - Make the newly added subtitle track available through the normal subtitle selector.
 
+- **JNI Integration (instead of jna)**
+
 ---
 
 ## [0.1.0-alpha.1]
