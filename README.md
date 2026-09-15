@@ -20,11 +20,33 @@ and positioned independently.
 ```
 
 The HUD editor intentionally has no custom keyboard shortcuts. Drag the video or detached
-subtitle box to move it and use the mouse wheel over a box to resize it. `Esc` and `Done`
-save the layout and return to the MpvCraft control menu.
+subtitle box to move it and use the mouse wheel over a box to resize it. `Esc`/close saves
+the layout and returns directly to the game.
 
-The control menu itself can be dragged by its title bar. Volume uses a continuous 0–200%
-slider and audio/subtitle tracks use dropdown selectors.
+The `/mpv` control surface is fully custom-rendered: there are no vanilla buttons, sliders
+or popup dropdowns. It follows the two-column mock-up with Playback/Volume/Display on the
+left and Subtitles/Audio/Chapters plus Media Information on the right. The title bar is
+draggable, track/chapter lists scroll inside their own card, and the HUD information row is
+clickable to open the layout editor.
+
+
+## Web URLs
+
+`/mpv play` accepts both direct media URLs and ordinary web-page URLs. Direct media such as
+`https://example.test/video.m3u8` or an MP4 is handed straight to libmpv. A normal page URL
+needs a resolver because the HTML page itself is not the video stream. MpvCraft enables
+mpv's built-in ytdl hook and looks for a recent `yt-dlp` executable in this order:
+
+1. JVM property `-Dmpvcraft.ytdlp=...`;
+2. `ytDlpPath` in `config/mpvcraft.json`;
+3. `.minecraft/yt-dlp(.exe)`, `.minecraft/tools/yt-dlp(.exe)`, or `.minecraft/mpvcraft/yt-dlp(.exe)`;
+4. the process `PATH`.
+
+If yt-dlp supports a page, mpv receives the resolved HLS/DASH/media streams and plays them
+without MpvCraft having to scrape the site itself. If the page is not supported by yt-dlp
+(or requires DRM/site-specific browser logic), `/mpv play <page-url>` cannot turn it into a
+stream automatically; use a direct media URL from a source you are authorized to access or
+add a dedicated resolver for that service.
 
 ## Rendering architecture
 
@@ -88,7 +110,7 @@ third-party font file.
 3. Build/run:
 
 ```bat
-set JAVA_HOME=C:\Users\<user>\AppData\Roaming\PrismLauncher\java\java-runtime-epsilon
+set JAVA_HOME=C:\Users\Nanako\AppData\Roaming\PrismLauncher\java\java-runtime-epsilon
 set PATH=%JAVA_HOME%\bin;%PATH%
 gradlew.bat runClient
 ```
@@ -122,3 +144,11 @@ do not bundle a GPL-configured mpv build unless your redistribution complies wit
 `/mpv` opens the movable control panel. Use **Open file…** to choose local media without typing a command; `/mpv play <path-or-url>` is still useful for URLs. The panel uses a clean runtime system sans-serif instead of Minecraft's bitmap font.
 
 `/mpv hud` opens only the HUD layout editor. **Esc** or **Done** saves and closes it directly. When subtitles are detached, dragging them shows a vertical centre guide and snaps their horizontal centre to the middle of the screen when close enough; vertical positioning remains free.
+
+### V5.6 polished UI and bitmap subtitle detaching
+
+The custom `/mpv` surface now renders its own rounded controls and icons as anti-aliased high-density RGBA textures instead of approximating them with Minecraft's pixel-aligned GUI primitives. The screen remains fully custom/hit-tested, but its buttons, switches, cards and icons are intentionally styled like a normal media application rather than Minecraft widgets.
+
+For local media, **Detached Subs** also supports bitmap subtitle tracks such as Blu-ray PGS, DVD/VobSub, DVB subtitles and XSUB. MpvCraft opens a synchronized subtitle-only libmpv core with video disabled and composites its transparent RGBA subtitle surface through a separate PiP layer. This preserves the original bitmap artwork without OCR and without decoding the video twice. `/mpv hud` can move and scale this image-subtitle canvas independently.
+
+Web/ytdl sources continue to use native attached image subtitles: running a second resolver/network session cannot safely guarantee the same track topology. If the local libmpv build cannot render a transparent subtitle-only surface, MpvCraft automatically falls back to native attached image subtitles.
