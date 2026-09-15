@@ -23,6 +23,11 @@ MpvCraft is currently in alpha. Features listed under **Unreleased / Upcoming** 
   - Click anywhere on the timeline to seek to that position.
   - Keep the timeline synchronized with the current playback position and media duration.
 
+- **Manual subtitle loading**
+  - Add an option in the MpvCraft menu to manually load an external subtitle file.
+  - Allow adding subtitles even when the current media already contains embedded subtitle tracks.
+  - Make the newly added subtitle track available through the normal subtitle selector.
+
 ---
 
 ## [0.1.0-alpha.1]
