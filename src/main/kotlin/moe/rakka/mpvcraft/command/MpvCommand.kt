@@ -115,7 +115,7 @@ object MpvCommand {
     fun tick() {
         if (pendingOpen) {
             pendingOpen = false
-            mc.setScreen(if (pendingHud) MpvHudScreen else MpvMenuScreen)
+            if (pendingHud) MpvHudScreen.openStandalone() else mc.setScreen(MpvMenuScreen)
         }
     }
 

@@ -3,6 +3,7 @@ package moe.rakka.mpvcraft.hud
 import moe.rakka.mpvcraft.MpvCraft
 import moe.rakka.mpvcraft.MpvCraft.mc
 import moe.rakka.mpvcraft.mpv.MpvPlayer
+import moe.rakka.mpvcraft.mpv.MpvBitmapSubtitlePlayer
 import moe.rakka.mpvcraft.render.MpvPipRenderer
 import moe.rakka.mpvcraft.render.MpvSubtitlePipRenderer
 import net.minecraft.client.DeltaTracker
@@ -72,7 +73,7 @@ object MpvHud {
         videoBox.height = h
 
         if (MpvPlayer.hasFile) {
-            MpvPipRenderer.draw(context, cfg.videoX, cfg.videoY, w, h)
+            MpvPipRenderer.draw(context, cfg.videoX, cfg.videoY, w, h, cfg.videoOpacity)
         } else if (editing) {
             // Nothing loaded yet, show a placeholder so the box is still grabbable.
             context.fill(cfg.videoX, cfg.videoY, cfg.videoX + w, cfg.videoY + h, 0xCC101010.toInt())
@@ -164,27 +165,107 @@ object MpvHud {
     }
 
     /**
-     * PGS/VobSub/DVB/XSUB are rendered by a synchronized subtitle-only libmpv
-     * core into a full transparent canvas. The canvas is screen-centred by
-     * default so the bitmap keeps its authoring coordinates, but it can be moved
-     * and scaled independently from the video in /mpv hud.
+     * PGS/VobSub/DVB/XSUB are decoded by the synchronized secondary libmpv core.
+     * The helper still renders against a source-shaped transparent canvas so mpv
+     * preserves authored PGS placement, but only the tight alpha crop is sent to
+     * Minecraft. This makes both the normal HUD and /mpv hud behave like ordinary
+     * detached text subtitles instead of exposing a giant screen-sized rectangle.
      */
     private fun drawDetachedImageSubtitles(context: GuiGraphicsExtractor, editing: Boolean) {
+        val crop = MpvBitmapSubtitlePlayer.visibleCrop
+        if (crop != null) {
+            val box = detachedImageBox(crop)
+            subBox.x = box.x
+            subBox.y = box.y
+            subBox.width = box.width
+            subBox.height = box.height
+            MpvSubtitlePipRenderer.draw(context, box.x, box.y, box.width, box.height)
+            if (editing) outline(context, subBox, subBox.contains(mouseX(), mouseY()))
+            return
+        }
+
+        // No cue is visible right now. A tiny transparent PiP keeps the helper
+        // progressing without paying the cost of a full-screen compositor pass.
+        MpvSubtitlePipRenderer.pump(context)
+
+        if (editing) {
+            val editorCrop = MpvBitmapSubtitlePlayer.editorCrop
+            val box = if (editorCrop != null) detachedImageBox(editorCrop) else detachedImagePlaceholderBox()
+            subBox.x = box.x
+            subBox.y = box.y
+            subBox.width = box.width
+            subBox.height = box.height
+            // Between cues, show a subtle grab target rather than an enormous
+            // transparent canvas. It is intentionally close to the text-sub editor.
+            context.fill(box.x, box.y, box.x + box.width, box.y + box.height, 0x281B2732)
+            val label = "Image subtitles"
+            val tw = MpvUi.width(label, size = 10)
+            MpvUi.draw(
+                context,
+                label,
+                box.x + (box.width - tw) / 2,
+                box.y + (box.height - MpvUi.lineHeight(10)) / 2,
+                0xCCFFFFFF.toInt(),
+                size = 10,
+                physicalPixels = true,
+            )
+            outline(context, subBox, subBox.contains(mouseX(), mouseY()))
+        }
+    }
+
+    /**
+     * Transform a tight libmpv crop into physical screen pixels. The source aspect
+     * is preserved and the whole authored subtitle canvas is fitted to the window;
+     * imageSubScale zooms that virtual canvas around the screen centre and the two
+     * offsets translate it. This preserves V5.7's placement semantics while making
+     * the editable box tight around the actual cue.
+     */
+    fun detachedImageBox(crop: MpvBitmapSubtitlePlayer.SubtitleCrop, includeOffset: Boolean = true): HudBox {
+        val screenW = mc.window.screenWidth.coerceAtLeast(1)
+        val screenH = mc.window.screenHeight.coerceAtLeast(1)
+        val canvasW = MpvBitmapSubtitlePlayer.renderCanvasWidth.coerceAtLeast(1)
+        val canvasH = MpvBitmapSubtitlePlayer.renderCanvasHeight.coerceAtLeast(1)
+        val fit = minOf(screenW.toDouble() / canvasW, screenH.toDouble() / canvasH)
+        val zoom = cfg.imageSubScale.coerceIn(0.35f, 3f).toDouble()
+        val px = fit * zoom
+        val virtualW = canvasW * px
+        val virtualH = canvasH * px
+        val offsetX = if (includeOffset) cfg.imageSubOffsetX else 0
+        val offsetY = if (includeOffset) cfg.imageSubOffsetY else 0
+        val canvasX = (screenW - virtualW) / 2.0 + offsetX
+        val canvasY = (screenH - virtualH) / 2.0 + offsetY
+        val authoredX = kotlin.math.round(canvasX + crop.x * px).toInt()
+        val y = kotlin.math.round(canvasY + crop.y * px).toInt()
+        val w = kotlin.math.round(crop.width * px).toInt().coerceAtLeast(1)
+        val h = kotlin.math.round(crop.height * px).toInt().coerceAtLeast(1)
+        // Same anchor semantics as detached text subtitles: once snapped, every
+        // new PGS/VobSub cue is centred from its *visible crop*, so changes in cue
+        // width or authored X position cannot make the subtitle wander sideways.
+        val x = if (includeOffset && cfg.imageSubCenterX) screenW / 2 - w / 2 else authoredX
+        return HudBox(x, y, w, h)
+    }
+
+    /** Current/last cue editor box without the user translation. */
+    fun detachedImageBaseEditorBox(): HudBox {
+        val crop = MpvBitmapSubtitlePlayer.editorCrop
+        return if (crop != null) detachedImageBox(crop, includeOffset = false) else detachedImagePlaceholderBox(includeOffset = false)
+    }
+
+    fun detachedImageEditorBox(): HudBox {
+        val crop = MpvBitmapSubtitlePlayer.editorCrop
+        return if (crop != null) detachedImageBox(crop) else detachedImagePlaceholderBox()
+    }
+
+    private fun detachedImagePlaceholderBox(includeOffset: Boolean = true): HudBox {
         val screenW = mc.window.screenWidth
         val screenH = mc.window.screenHeight
-        val scale = cfg.imageSubScale.coerceIn(0.35f, 3f)
-        val canvasW = (screenW * scale).toInt().coerceAtLeast(1)
-        val canvasH = (screenH * scale).toInt().coerceAtLeast(1)
-        val originX = (screenW - canvasW) / 2 + cfg.imageSubOffsetX
-        val originY = (screenH - canvasH) / 2 + cfg.imageSubOffsetY
-
-        subBox.x = originX
-        subBox.y = originY
-        subBox.width = canvasW
-        subBox.height = canvasH
-
-        MpvSubtitlePipRenderer.draw(context, originX, originY, canvasW, canvasH)
-        if (editing) outline(context, subBox, subBox.contains(mouseX(), mouseY()))
+        val w = minOf(360, (screenW * 0.45).toInt()).coerceAtLeast(160)
+        val h = 72
+        val offsetX = if (includeOffset) cfg.imageSubOffsetX else 0
+        val offsetY = if (includeOffset) cfg.imageSubOffsetY else 0
+        val x = (screenW - w) / 2 + offsetX
+        val y = (screenH * 0.78).toInt() - h / 2 + offsetY
+        return HudBox(x, y, w, h)
     }
 
     private fun outline(context: GuiGraphicsExtractor, box: HudBox, hovered: Boolean) {

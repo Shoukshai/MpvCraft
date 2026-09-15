@@ -1,6 +1,7 @@
 package moe.rakka.mpvcraft.config
 
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonParser
 import moe.rakka.mpvcraft.MpvCraft
 import java.io.File
 
@@ -15,6 +16,8 @@ data class MpvConfig(
     /** Width in real pixels. Height follows the video aspect ratio. */
     var videoWidth: Int = 640,
     var videoEnabled: Boolean = true,
+    /** Opacity of the in-game video surface, 0 = transparent, 1 = opaque. */
+    var videoOpacity: Float = 1f,
 
     // subtitles, independent of the video window
     var subX: Int = 0,
@@ -27,9 +30,11 @@ data class MpvConfig(
     var subAttached: Boolean = true,
     var subBackground: Boolean = true,
     var subMaxWidth: Int = 720,
-    /** Scale of the full transparent canvas used by detached bitmap subtitles. */
+    /** Zoom of detached bitmap subtitles; the editor only exposes the visible alpha crop. */
     var imageSubScale: Float = 1f,
-    /** Pixel offset from a screen-centred detached bitmap subtitle canvas. */
+    /** Keep detached bitmap subtitle cues horizontally centred as their crop changes. */
+    var imageSubCenterX: Boolean = false,
+    /** Translation applied to the source-fitted bitmap subtitle canvas. */
     var imageSubOffsetX: Int = 0,
     var imageSubOffsetY: Int = 0,
 
@@ -69,13 +74,25 @@ data class MpvConfig(
         }
 
         fun load(): MpvConfig = try {
-            val loaded = if (FILE.exists()) GSON.fromJson(FILE.readText(), MpvConfig::class.java) ?: MpvConfig()
-            else MpvConfig()
-            // Migration guard for pre-V5.6 configs / Gson runtimes that may leave
-            // newly introduced primitive fields at zero rather than constructor defaults.
-            if (!loaded.imageSubScale.isFinite() || loaded.imageSubScale <= 0f) loaded.imageSubScale = 1f
-            loaded.imageSubScale = loaded.imageSubScale.coerceIn(0.35f, 3f)
-            loaded
+            if (!FILE.exists()) {
+                MpvConfig()
+            } else {
+                val root = JsonParser.parseString(FILE.readText()).asJsonObject
+                val loaded = GSON.fromJson(root, MpvConfig::class.java) ?: MpvConfig()
+
+                // Gson can leave newly introduced primitive fields at zero when an old
+                // config is loaded. Use field presence for defaults where zero itself is
+                // a valid user value (notably fully transparent video).
+                if (!root.has("videoOpacity")) loaded.videoOpacity = 1f
+                if (!root.has("imageSubCenterX")) loaded.imageSubCenterX = false
+                if (!root.has("imageSubScale") || !loaded.imageSubScale.isFinite() || loaded.imageSubScale <= 0f) {
+                    loaded.imageSubScale = 1f
+                }
+
+                loaded.videoOpacity = loaded.videoOpacity.coerceIn(0f, 1f)
+                loaded.imageSubScale = loaded.imageSubScale.coerceIn(0.35f, 3f)
+                loaded
+            }
         } catch (t: Throwable) {
             MpvCraft.logger.error("Could not read config, using defaults", t)
             MpvConfig()

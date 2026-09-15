@@ -2,6 +2,7 @@ package moe.rakka.mpvcraft.hud
 
 import moe.rakka.mpvcraft.MpvCraft
 import moe.rakka.mpvcraft.MpvCraft.mc
+import moe.rakka.mpvcraft.mpv.MpvBitmapSubtitlePlayer
 import moe.rakka.mpvcraft.mpv.MpvPlayer
 import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.gui.screens.Screen
@@ -59,7 +60,7 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
 
     private enum class RightTab { SUBTITLES, AUDIO, CHAPTERS }
     private enum class ActionIcon { PAUSE, PLAY, REWIND, FORWARD, STOP, SKIP, FOLDER }
-    private enum class MiniIcon { PLAYBACK, VOLUME, DISPLAY, SUBTITLES, AUDIO, CHAPTERS, INFO, LINK, HEART, CLOSE }
+    private enum class MiniIcon { PLAYBACK, VOLUME, DISPLAY, SUBTITLES, AUDIO, CHAPTERS, INFO, LINK, HEART, MOVE, CLOSE }
 
     private data class Rect(val x: Int, val y: Int, val w: Int, val h: Int) {
         fun contains(px: Double, py: Double): Boolean =
@@ -109,6 +110,7 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
     private var panelGrabX = 0
     private var panelGrabY = 0
     private var draggingVolume = false
+    private var draggingVideoOpacity = false
 
     private var observedHasFile = false
     private var observedSubtitlePresentation = MpvPlayer.SubtitlePresentation.NONE
@@ -188,6 +190,7 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
     private fun browserCard(): Rect = Rect(rightX, bodyTop, colW, rightTopH)
     private fun infoCard(): Rect = Rect(rightX, bodyTop + rightTopH + CARD_GAP, colW, rightInfoH)
     private fun closeRect(): Rect = Rect(panelX + panelW - 42, panelY + 12, 26, 26)
+    private fun moveUiRect(): Rect = Rect(closeRect().x - 84, panelY + 13, 74, 24)
     private fun headerPlayRect(): Rect = Rect(panelX + 17, panelY + 11, 36, 36)
     private fun headerDragRect(): Rect = Rect(panelX, panelY, panelW - 50, HEADER_H)
 
@@ -215,7 +218,14 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
         val x1 = card.x + 12
         val x2 = x1 + half + gap
         val imageSub = MpvPlayer.usesImageSubtitles
-        val detachedDetail = if (imageSub) "Separate PGS/image layer" else "Separate subtitle HUD"
+        val bitmapFailure = MpvBitmapSubtitlePlayer.failureReason
+        val detachedDetail = when {
+            !imageSub -> "Separate subtitle HUD"
+            cfg.subAttached -> "Separate PGS/image layer"
+            MpvPlayer.usesDetachedImageSubtitles && bitmapFailure == null -> "PGS/image layer active"
+            bitmapFailure != null -> "PGS fallback - toggle to retry"
+            else -> "Preparing PGS/image layer"
+        }
         return listOf(
             ToggleSpec(Rect(x1, startY, half, h), "Video", "Show video in game", cfg.videoEnabled, true) {
                 cfg.videoEnabled = !cfg.videoEnabled
@@ -236,6 +246,21 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
                 MpvPlayer.flipY = cfg.flipY
             },
         )
+    }
+
+    private fun videoOpacityCardRect(): Rect {
+        val card = leftCard()
+        val startY = card.y + 191
+        val gap = 5
+        val half = (card.w - 24 - gap) / 2
+        val h = 37
+        val x2 = card.x + 12 + half + gap
+        return Rect(x2, startY + (h + gap) * 2, half, h)
+    }
+
+    private fun videoOpacityTrackRect(): Rect {
+        val card = videoOpacityCardRect()
+        return Rect(card.x + 8, card.y + 24, card.w - 16, 7)
     }
 
     private fun tabRects(): Map<RightTab, Rect> {
@@ -295,6 +320,7 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
     ) {
         if (draggingPanel) movePanelTo(mouseX - panelGrabX, mouseY - panelGrabY)
         if (draggingVolume) updateVolumeFromMouse(mouseX.toDouble())
+        if (draggingVideoOpacity) updateVideoOpacityFromMouse(mouseX.toDouble())
 
         super.extractRenderState(graphics, mouseX, mouseY, deltaTicks)
 
@@ -336,7 +362,7 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
         MpvUi.draw(g, "•", stateX + stateW + 5, panelY + 32, MUTED, size = 11)
         MpvUi.draw(
             g,
-            MpvUi.clip(media, (panelW - 250 - stateW).coerceAtLeast(110), size = 11),
+            MpvUi.clip(media, (panelW - 330 - stateW).coerceAtLeast(86), size = 11),
             stateX + stateW + 17,
             panelY + 32,
             MUTED,
@@ -349,15 +375,15 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
         outlineRoundRect(g, close.x, close.y, close.w, close.h, 10, BORDER, if (closeHovered) CONTROL_HOVER else CONTROL_BG)
         drawMiniIcon(g, MiniIcon.CLOSE, close.x + 7, close.y + 7, 12, if (closeHovered) TEXT else MUTED)
 
-        val hint = "Drag to move"
-        MpvUi.draw(
-            g,
-            hint,
-            close.x - 18 - MpvUi.width(hint, size = 10),
-            panelY + 20,
-            DIM,
-            size = 10,
-        )
+        // Explicit layout editor entry point. This is a normal application-style
+        // pill button rather than a hidden click target on the HUD info row.
+        val move = moveUiRect()
+        val moveHovered = move.contains(mouseX.toDouble(), mouseY.toDouble())
+        val moveFill = if (moveHovered) CONTROL_HOVER else 0xB91D2A34.toInt()
+        fillRoundRect(g, move.x, move.y, move.w, move.h, 12, moveFill)
+        outlineRoundRect(g, move.x, move.y, move.w, move.h, 12, if (moveHovered) ACCENT_SOFT else BORDER, moveFill)
+        drawMiniIcon(g, MiniIcon.MOVE, move.x + 9, move.y + 6, 12, if (moveHovered) ACCENT else MUTED)
+        MpvUi.draw(g, "Move UI", move.x + 25, move.y + 7, if (moveHovered) TEXT else MUTED, size = 10)
 
         // subtle handle above the title, as in the mock-up
         fillRoundRect(g, panelX + panelW / 2 - 19, panelY + 7, 38, 3, 2, 0xFF668093.toInt())
@@ -402,6 +428,7 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
         drawSectionTitle(g, card.x + 13, card.y + 174, MiniIcon.DISPLAY, "Display")
 
         toggleSpecs().forEach { spec -> drawToggleCard(g, spec, mouseX, mouseY) }
+        drawVideoOpacityCard(g, mouseX, mouseY)
     }
 
     private fun drawActionButton(
@@ -453,6 +480,42 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
         if (fillW > 0) fillRoundRect(g, rect.x, centerY - 3, fillW, 6, 3, ACCENT)
         val knobX = (rect.x + fillW).coerceIn(rect.x + 5, rect.x + rect.w - 5)
         fillRoundRect(g, knobX - 6, centerY - 6, 12, 12, 6, if (hovered || draggingVolume) 0xFFFFFFFF.toInt() else 0xFFE9F2F8.toInt())
+    }
+
+    private fun drawVideoOpacityCard(g: GuiGraphicsExtractor, mouseX: Int, mouseY: Int) {
+        val card = videoOpacityCardRect()
+        val track = videoOpacityTrackRect()
+        val hovered = card.contains(mouseX.toDouble(), mouseY.toDouble())
+        outlineRoundRect(
+            g,
+            card.x,
+            card.y,
+            card.w,
+            card.h,
+            10,
+            if (hovered) 0xAA5D7585.toInt() else BORDER,
+            if (hovered) CONTROL_HOVER else CONTROL_BG,
+        )
+
+        MpvUi.draw(g, "Video opacity", card.x + 8, card.y + 6, TEXT, size = 9, bold = true)
+        val percent = (cfg.videoOpacity.coerceIn(0f, 1f) * 100f).roundToInt()
+        val value = "$percent%"
+        MpvUi.draw(g, value, card.x + card.w - 8 - MpvUi.width(value, size = 8), card.y + 7, DIM, size = 8)
+
+        val centerY = track.y + track.h / 2
+        fillRoundRect(g, track.x, centerY - 2, track.w, 4, 2, TRACK_BG)
+        val fillW = (track.w * cfg.videoOpacity.coerceIn(0f, 1f)).roundToInt().coerceIn(0, track.w)
+        if (fillW > 0) fillRoundRect(g, track.x, centerY - 2, fillW, 4, 2, ACCENT)
+        val knobX = (track.x + fillW).coerceIn(track.x + 4, track.x + track.w - 4)
+        fillRoundRect(
+            g,
+            knobX - 4,
+            centerY - 4,
+            8,
+            8,
+            4,
+            if (hovered || draggingVideoOpacity) 0xFFFFFFFF.toInt() else 0xFFE9F2F8.toInt(),
+        )
     }
 
     private fun drawToggleCard(g: GuiGraphicsExtractor, spec: ToggleSpec, mouseX: Int, mouseY: Int) {
@@ -670,15 +733,20 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
     private fun drawFooter(g: GuiGraphicsExtractor, mouseX: Int, mouseY: Int) {
         val y = panelY + panelH - 19
         drawMiniIcon(g, MiniIcon.LINK, panelX + 17, y - 1, 12, DIM)
+        val bitmapFailure = if (!cfg.subAttached && MpvPlayer.usesNativeImageSubtitles) {
+            MpvBitmapSubtitlePlayer.failureReason
+        } else null
         val footerText = when {
             filePickerBusy -> "Opening local file picker..."
             filePickerError != null -> filePickerError!!
+            bitmapFailure != null -> "PGS detach fallback: $bitmapFailure"
             notice != null -> notice!!
             else -> "Local files, URLs, chapters and subtitle tracks in one place."
         }
         val footerColor = when {
             filePickerError != null -> BAD
             filePickerBusy -> WARN
+            bitmapFailure != null -> WARN
             notice != null -> GOOD
             else -> DIM
         }
@@ -792,6 +860,12 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
             return true
         }
 
+        if (moveUiRect().contains(mx, my)) {
+            cfg.save()
+            MpvHudScreen.openFromMenu()
+            return true
+        }
+
         if (headerPlayRect().contains(mx, my) && MpvPlayer.hasFile) {
             MpvPlayer.togglePause()
             return true
@@ -818,6 +892,14 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
         if (expandedVolume.contains(mx, my)) {
             draggingVolume = true
             updateVolumeFromMouse(mx)
+            return true
+        }
+
+        val opacityTrack = videoOpacityTrackRect()
+        val expandedOpacity = Rect(opacityTrack.x - 3, opacityTrack.y - 7, opacityTrack.w + 6, opacityTrack.h + 14)
+        if (expandedOpacity.contains(mx, my)) {
+            draggingVideoOpacity = true
+            updateVideoOpacityFromMouse(mx)
             return true
         }
 
@@ -850,11 +932,11 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
             return true
         }
 
-        // Preserve the old HUD editor without adding a button that is absent from
-        // the visual mock-up: the "HUD" information row itself is the edit affordance.
+        // Keep the HUD information row as a second shortcut; the explicit
+        // Move UI button in the header is the primary layout-editor entry point.
         if (infoHudRowRect().contains(mx, my)) {
             cfg.save()
-            mc.setScreen(MpvHudScreen)
+            MpvHudScreen.openFromMenu()
             return true
         }
 
@@ -877,6 +959,11 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
         }
         if (draggingVolume) {
             draggingVolume = false
+            cfg.save()
+            consumed = true
+        }
+        if (draggingVideoOpacity) {
+            draggingVideoOpacity = false
             cfg.save()
             consumed = true
         }
@@ -908,6 +995,14 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
             cfg.volume = next
             MpvPlayer.setVolume(next)
         }
+    }
+
+    private fun updateVideoOpacityFromMouse(mouseX: Double) {
+        val rect = videoOpacityTrackRect()
+        val ratio = ((mouseX - rect.x) / rect.w.toDouble()).coerceIn(0.0, 1.0)
+        // Store exact percentage steps so the value shown in the menu and the
+        // framebuffer alpha are stable while dragging.
+        cfg.videoOpacity = (ratio * 100.0).roundToInt().coerceIn(0, 100) / 100f
     }
 
     // ---------------------------------------------------------------------
@@ -971,6 +1066,7 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
     override fun onClose() {
         draggingPanel = false
         draggingVolume = false
+        draggingVideoOpacity = false
         cfg.save()
         mc.setScreen(null)
     }
@@ -1045,6 +1141,7 @@ object MpvMenuScreen : Screen(MpvUi.text("MpvCraft")) {
             MiniIcon.INFO -> MpvUi.Icon.INFO
             MiniIcon.LINK -> MpvUi.Icon.LINK
             MiniIcon.HEART -> MpvUi.Icon.HEART
+            MiniIcon.MOVE -> MpvUi.Icon.MOVE
             MiniIcon.CLOSE -> MpvUi.Icon.CLOSE
         }
         MpvUi.icon(g, vector, x, y, size, color)

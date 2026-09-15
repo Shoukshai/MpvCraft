@@ -58,6 +58,7 @@ object MpvUi {
         INFO,
         LINK,
         HEART,
+        MOVE,
         CLOSE,
     }
 
@@ -456,6 +457,15 @@ object MpvUi {
                 p.curveTo(19.8 * u, 13.8 * u, 14.0 * u, 17.3 * u, 12.0 * u, 19.2 * u)
                 p.closePath()
                 g.fill(p)
+            }
+            Icon.MOVE -> {
+                g.stroke = stroke(1.55)
+                g.drawLine((12.0 * u).toInt(), (4.0 * u).toInt(), (12.0 * u).toInt(), (20.0 * u).toInt())
+                g.drawLine((4.0 * u).toInt(), (12.0 * u).toInt(), (20.0 * u).toInt(), (12.0 * u).toInt())
+                g.fill(path(12.0 to 2.8, 9.5 to 6.0, 14.5 to 6.0, close = true))
+                g.fill(path(12.0 to 21.2, 9.5 to 18.0, 14.5 to 18.0, close = true))
+                g.fill(path(2.8 to 12.0, 6.0 to 9.5, 6.0 to 14.5, close = true))
+                g.fill(path(21.2 to 12.0, 18.0 to 9.5, 18.0 to 14.5, close = true))
             }
             Icon.CLOSE -> {
                 g.stroke = stroke(1.8)

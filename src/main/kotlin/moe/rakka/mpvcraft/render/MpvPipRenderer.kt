@@ -14,6 +14,7 @@ import net.minecraft.client.renderer.MultiBufferSource
 import net.minecraft.client.renderer.state.gui.pip.PictureInPictureRenderState
 import org.joml.Matrix3x2f
 import org.lwjgl.opengl.GL33C
+import org.lwjgl.system.MemoryStack
 
 /**
  * Bridges libmpv into the 26.x GUI pipeline.
@@ -82,6 +83,23 @@ class MpvPipRenderer(
                 0, 0, width, height,
                 GL33C.GL_COLOR_BUFFER_BIT, GL33C.GL_LINEAR
             )
+
+            // PIP compositing already honours texture alpha (the detached PGS
+            // renderer relies on it). Preserve the video's RGB from the GPU blit
+            // and rewrite only the alpha channel, so opacity costs no CPU copy and
+            // does not make libmpv render a second time.
+            val opacity = state.opacity.coerceIn(0f, 1f)
+            if (opacity < 0.999f) {
+                GL33C.glColorMask(false, false, false, true)
+                MemoryStack.stackPush().use { stack ->
+                    GL33C.glClearBufferfv(
+                        GL33C.GL_COLOR,
+                        0,
+                        stack.floats(0f, 0f, 0f, opacity),
+                    )
+                }
+                GL33C.glColorMask(true, true, true, true)
+            }
             if (scissorWasEnabled) GL33C.glEnable(GL33C.GL_SCISSOR_TEST)
             if (srgbWasEnabled) GL33C.glEnable(GL33C.GL_FRAMEBUFFER_SRGB)
         }
@@ -100,6 +118,7 @@ class MpvPipRenderer(
         private val y: Int,
         private val width: Int,
         private val height: Int,
+        val opacity: Float,
         private val scissor: ScreenRectangle?,
         private val bounds: ScreenRectangle?,
     ) : PictureInPictureRenderState {
@@ -122,7 +141,14 @@ class MpvPipRenderer(
          * physical rectangle made Minecraft apply guiScale a second time. The
          * result was exactly the observed 2x video / mismatched editor outline.
          */
-        fun draw(context: GuiGraphicsExtractor, x: Int, y: Int, width: Int, height: Int) {
+        fun draw(
+            context: GuiGraphicsExtractor,
+            x: Int,
+            y: Int,
+            width: Int,
+            height: Int,
+            opacity: Float = 1f,
+        ) {
             if (width <= 0 || height <= 0) return
             val scissor = context.scissorStack.peek()
             val pose = Matrix3x2f(context.pose())
@@ -135,6 +161,7 @@ class MpvPipRenderer(
                     rect.top(),
                     rect.width(),
                     rect.height(),
+                    opacity.coerceIn(0f, 1f),
                     scissor,
                     bounds,
                 )

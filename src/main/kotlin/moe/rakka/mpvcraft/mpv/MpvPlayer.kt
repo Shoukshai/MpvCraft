@@ -342,8 +342,14 @@ object MpvPlayer {
             Mpv.FORMAT_INT64 -> {
                 val v = d.getLong(0).toInt()
                 when (id) {
-                    Mpv.OBS_WIDTH -> if (v > 0) videoWidth = v
-                    Mpv.OBS_HEIGHT -> if (v > 0) videoHeight = v
+                    Mpv.OBS_WIDTH -> if (v > 0 && v != videoWidth) {
+                        videoWidth = v
+                        subtitlePresentationDirty.set(true)
+                    }
+                    Mpv.OBS_HEIGHT -> if (v > 0 && v != videoHeight) {
+                        videoHeight = v
+                        subtitlePresentationDirty.set(true)
+                    }
                 }
             }
             Mpv.FORMAT_FLAG -> {
@@ -555,13 +561,25 @@ object MpvPlayer {
         appliedSubEnabled = enabled
         appliedSubAttached = attached
 
+        // current-tracks normally exposes codec/id directly, but fall back to
+        // track-list for muxers/builds where one of those sub-properties is
+        // temporarily unavailable. This matters for embedded Blu-ray PGS tracks.
+        val selectedSub = tracks().firstOrNull { it.type == "sub" && it.selected }
         val codec = getProperty("current-tracks/sub/codec").orEmpty()
-        val sid = getProperty("current-tracks/sub/id")?.toIntOrNull()
+            .ifBlank { selectedSub?.codec.orEmpty() }
+        val sid = getProperty("current-tracks/sub/id")?.toIntOrNull() ?: selectedSub?.id
         val image = isImageSubtitleCodec(codec)
         val source = currentSource
         val externalSubtitle = selectedExternalSubtitleFilename()
         val externalSupported = externalSubtitle == null || MpvBitmapSubtitlePlayer.supportsSource(externalSubtitle)
-        val detachedImageAllowed = image && !attached && enabled && sid != null &&
+
+        // A user explicitly toggling detached bitmap subtitles should retry a
+        // recoverable failure from the previous helper attempt. Permanent libmpv
+        // initialization failures remain latched.
+        if (force && image && !attached && enabled) MpvBitmapSubtitlePlayer.retryCurrentSource()
+
+        val dimensionsReady = videoWidth > 0 && videoHeight > 0
+        val detachedImageAllowed = image && !attached && enabled && sid != null && dimensionsReady &&
             MpvBitmapSubtitlePlayer.supportsSource(source) && externalSupported &&
             MpvBitmapSubtitlePlayer.canRenderCurrentSource
 
@@ -573,10 +591,23 @@ object MpvPlayer {
         }
 
         if (subtitlePresentation == SubtitlePresentation.DETACHED_IMAGE) {
-            MpvBitmapSubtitlePlayer.configure(source, sid, enabled = true, externalSubtitle = externalSubtitle)
+            MpvBitmapSubtitlePlayer.configure(
+                source = source,
+                sid = sid,
+                enabled = true,
+                externalSubtitle = externalSubtitle,
+                videoWidth = videoWidth,
+                videoHeight = videoHeight,
+            )
             syncDetachedImageClock(force = true)
         } else {
-            MpvBitmapSubtitlePlayer.deactivate()
+            // If the user still asked for detached bitmap subtitles and the
+            // helper just failed, keep that recoverable reason latched. This
+            // prevents an attach/detach retry loop every HUD frame and lets the
+            // /mpv menu explain the exact fallback. Switching mode/file clears it.
+            val preserveBitmapFailure = image && enabled && !attached &&
+                MpvBitmapSubtitlePlayer.failureReason != null
+            MpvBitmapSubtitlePlayer.deactivate(clearFailure = !preserveBitmapFailure)
         }
 
         // Only the native-image path enters the primary video output. Text and

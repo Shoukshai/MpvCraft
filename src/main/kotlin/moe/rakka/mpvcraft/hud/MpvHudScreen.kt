@@ -12,11 +12,29 @@ import kotlin.math.sign
 /**
  * Mouse-only HUD layout editor.
  *
- * Text subtitles keep their horizontal centre snap. Bitmap subtitles use a
- * different model: mpv renders the complete authored subtitle canvas (PGS,
- * VobSub, DVB, XSUB) and the editor moves/scales that canvas as one unit.
+ * Text and detached bitmap subtitles share the same horizontal centre-anchor
+ * behaviour. Bitmap cues are still rendered by mpv on their authored canvas,
+ * but the editor exposes only the visible crop and can persistently centre that
+ * crop as cue widths/positions change.
  */
 object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
+
+    /**
+     * True only when the layout editor was opened from the main /mpv menu.
+     * In that flow Escape/Done returns to the menu. /mpv hud opens the editor
+     * standalone, so Escape/Done returns directly to the game.
+     */
+    private var returnToMenuOnClose = false
+
+    fun openFromMenu() {
+        returnToMenuOnClose = true
+        mc.setScreen(this)
+    }
+
+    fun openStandalone() {
+        returnToMenuOnClose = false
+        mc.setScreen(this)
+    }
 
     private enum class Target { NONE, VIDEO, SUBS }
 
@@ -43,9 +61,12 @@ object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
     private fun doneRect() = Rect(width - 80, 12, 68, 25)
 
     override fun init() {
-        subtitleCentered = cfg.subCenterX
+        subtitleCentered = currentSubtitleCentered()
         clampAll()
     }
+
+    private fun currentSubtitleCentered(): Boolean =
+        if (MpvPlayer.usesDetachedImageSubtitles) cfg.imageSubCenterX else cfg.subCenterX
 
     override fun extractRenderState(
         guiGraphics: GuiGraphicsExtractor,
@@ -53,7 +74,7 @@ object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
         mouseY: Int,
         deltaTicks: Float,
     ) {
-        subtitleCentered = cfg.subCenterX
+        subtitleCentered = currentSubtitleCentered()
         when (dragging) {
             Target.VIDEO -> {
                 cfg.videoX = (MpvHud.mouseX() + grabX).toInt()
@@ -61,13 +82,12 @@ object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
             }
             Target.SUBS -> {
                 if (MpvPlayer.usesDetachedImageSubtitles) {
-                    val sf = cfg.imageSubScale.coerceIn(0.35f, 3f)
-                    val canvasW = (mc.window.screenWidth * sf).toInt().coerceAtLeast(1)
-                    val canvasH = (mc.window.screenHeight * sf).toInt().coerceAtLeast(1)
                     val desiredX = (MpvHud.mouseX() + grabX).toInt()
                     val desiredY = (MpvHud.mouseY() + grabY).toInt()
-                    cfg.imageSubOffsetX = desiredX - (mc.window.screenWidth - canvasW) / 2
-                    cfg.imageSubOffsetY = desiredY - (mc.window.screenHeight - canvasH) / 2
+                    val base = MpvHud.detachedImageBaseEditorBox()
+                    cfg.imageSubOffsetX = desiredX - base.x
+                    cfg.imageSubOffsetY = desiredY - base.y
+                    applyImageSubtitleCenterSnap(desiredX, base.width)
                 } else {
                     cfg.subX = (MpvHud.mouseX() + grabX).toInt()
                     cfg.subY = (MpvHud.mouseY() + grabY).toInt()
@@ -79,7 +99,9 @@ object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
         clampAll()
 
         MpvHud.draw(guiGraphics, editing = true)
-        if (dragging == Target.SUBS && !cfg.subAttached && !MpvPlayer.usesImageSubtitles) {
+        if (dragging == Target.SUBS && !cfg.subAttached &&
+            (MpvPlayer.usesDetachedImageSubtitles || !MpvPlayer.usesImageSubtitles)
+        ) {
             drawSubtitleCenterGuide(guiGraphics)
         }
 
@@ -98,6 +120,20 @@ object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
         if (subtitleCentered) cfg.subX = screenCenter - width / 2
     }
 
+    /** Horizontal centre anchor for cropped bitmap cues, mirroring text subtitles. */
+    private fun applyImageSubtitleCenterSnap(desiredX: Int, cueWidth: Int) {
+        val width = cueWidth.coerceAtLeast(1)
+        val screenCenter = mc.window.screenWidth / 2
+        subtitleCentered = abs(desiredX + width / 2 - screenCenter) <= CENTER_SNAP_PX
+        cfg.imageSubCenterX = subtitleCentered
+        if (subtitleCentered) {
+            // Keep a coherent hidden offset so grabbing the cue again to unsnap it
+            // does not jump back to its authored PGS X position.
+            val base = MpvHud.detachedImageBaseEditorBox()
+            cfg.imageSubOffsetX = screenCenter - width / 2 - base.x
+        }
+    }
+
     /** One vertical line only: X centering aid, no Y-axis snapping/guide. */
     private fun drawSubtitleCenterGuide(g: GuiGraphicsExtractor) {
         g.pose().pushMatrix()
@@ -113,7 +149,7 @@ object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
     private fun drawEditorChrome(g: GuiGraphicsExtractor) {
         val note = when {
             MpvPlayer.usesDetachedImageSubtitles ->
-                "Drag detached image subtitles to move - scroll to scale"
+                "Drag image subtitles - scroll to scale - guide snaps X to centre"
             MpvPlayer.usesNativeImageSubtitles && !cfg.subAttached ->
                 "Image subtitle detach unavailable for this source - native fallback"
             MpvPlayer.usesNativeImageSubtitles ->
@@ -184,8 +220,15 @@ object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
                 }
                 Target.SUBS -> {
                     if (MpvPlayer.usesDetachedImageSubtitles) {
-                        grabX = MpvHud.subBox.x - mx
-                        grabY = MpvHud.subBox.y - my
+                        val current = MpvHud.detachedImageEditorBox()
+                        if (cfg.imageSubCenterX) {
+                            val base = MpvHud.detachedImageBaseEditorBox()
+                            cfg.imageSubCenterX = false
+                            subtitleCentered = false
+                            cfg.imageSubOffsetX = current.x - base.x
+                        }
+                        grabX = current.x - mx
+                        grabY = current.y - my
                     } else {
                         cfg.subX = MpvHud.subBox.x
                         cfg.subCenterX = false
@@ -204,7 +247,7 @@ object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
     override fun mouseReleased(mouseButtonEvent: MouseButtonEvent): Boolean {
         if (dragging != Target.NONE) {
             dragging = Target.NONE
-            subtitleCentered = cfg.subCenterX
+            subtitleCentered = currentSubtitleCentered()
             cfg.save()
             return true
         }
@@ -235,7 +278,21 @@ object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
             }
             Target.SUBS -> {
                 if (MpvPlayer.usesDetachedImageSubtitles) {
+                    // Zoom around the visible cue. In centre-anchor mode X is owned
+                    // by the anchor, while Y still scales around the current cue.
+                    val wasCentered = cfg.imageSubCenterX
+                    val before = MpvHud.detachedImageEditorBox()
+                    val centerX = before.x + before.width / 2
+                    val centerY = before.y + before.height / 2
                     cfg.imageSubScale = (cfg.imageSubScale + dir * 0.05f).coerceIn(0.35f, 3f)
+                    val after = MpvHud.detachedImageEditorBox()
+                    if (!wasCentered) {
+                        cfg.imageSubOffsetX += centerX - (after.x + after.width / 2)
+                    } else {
+                        val baseAfter = MpvHud.detachedImageBaseEditorBox()
+                        cfg.imageSubOffsetX = mc.window.screenWidth / 2 - after.width / 2 - baseAfter.x
+                    }
+                    cfg.imageSubOffsetY += centerY - (after.y + after.height / 2)
                 } else {
                     cfg.subScale = (cfg.subScale + dir * 0.2f).coerceIn(0.5f, 12f)
                 }
@@ -262,11 +319,14 @@ object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
 
         if (cfg.subAttached) return
         if (MpvPlayer.usesDetachedImageSubtitles) {
-            // Keep the centre of the bitmap canvas reachable even when scaled > 1x.
-            val centerX = (w / 2 + cfg.imageSubOffsetX).coerceIn(0, w)
-            val centerY = (h / 2 + cfg.imageSubOffsetY).coerceIn(0, h)
-            cfg.imageSubOffsetX = centerX - w / 2
-            cfg.imageSubOffsetY = centerY - h / 2
+            // Clamp the actual cue/compact editor handle, not the invisible source
+            // canvas. A centred cue owns X through its anchor, so only Y is clamped.
+            val box = MpvHud.detachedImageEditorBox()
+            val oldX = box.x
+            val oldY = box.y
+            box.clampTo(w, h)
+            if (!cfg.imageSubCenterX) cfg.imageSubOffsetX += box.x - oldX
+            cfg.imageSubOffsetY += box.y - oldY
         } else if (!MpvPlayer.usesImageSubtitles) {
             MpvHud.subBox.let {
                 it.x = if (cfg.subCenterX) w / 2 - it.width / 2 else cfg.subX
@@ -282,7 +342,9 @@ object MpvHudScreen : Screen(MpvUi.text("MpvCraft HUD layout")) {
         dragging = Target.NONE
         subtitleCentered = false
         cfg.save()
-        mc.setScreen(null)
+        val returnToMenu = returnToMenuOnClose
+        returnToMenuOnClose = false
+        mc.setScreen(if (returnToMenu) MpvMenuScreen else null)
     }
 
     override fun isPauseScreen(): Boolean = false

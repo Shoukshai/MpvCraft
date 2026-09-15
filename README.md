@@ -1,154 +1,136 @@
 # MpvCraft
 
-MpvCraft embeds libmpv as a movable in-game video player for Minecraft 26.1.2 / Fabric.
-Subtitles are rendered by Minecraft itself and can either follow the video or be detached
-and positioned independently.
+MpvCraft embeds **libmpv** as a movable media player inside Minecraft using Fabric.
+The video surface, subtitle layer and control UI are rendered in-game without vanilla
+Minecraft widgets.
+
+## Features
+
+- Local files and direct media URLs through libmpv.
+- Ordinary webpage URLs through mpv's `ytdl_hook` when a compatible `yt-dlp` is available.
+- Movable/resizable in-game video surface.
+- 0-100% video opacity control.
+- Custom playback UI with audio, subtitle and chapter selection.
+- Chapter-aware **Skip OP / Skip Intro** action.
+- Detached text subtitles with independent scale, position, background and horizontal centre snap.
+- Detached bitmap subtitles for local PGS/Blu-ray, VobSub/DVD, DVB and XSUB tracks.
+- Bitmap subtitles preserve mpv's original rendering, are cropped to the visible cue for performance,
+  and support the same persistent horizontal centre snap as detached text subtitles.
+- Native local file picker on Windows/macOS/Linux.
 
 ## Commands
 
 ```text
 /mpv                       open the control menu
-/mpv hud                   open the mouse-only HUD layout editor
-/mpv play <path or url>    load media
+/mpv hud                   open the HUD layout editor directly
+/mpv play <path-or-url>    load media
 /mpv pause                 play / pause
 /mpv stop                  stop playback
 /mpv subs                  cycle subtitle tracks
 /mpv audio                 cycle audio tracks
 /mpv volume <0-200>        set mpv volume
 /mpv sub <file>            add/select an external subtitle file
+/mpv skipintro             skip the detected intro/opening chapter
 /mpv cmd <anything>        raw mpv command
 ```
 
-The HUD editor intentionally has no custom keyboard shortcuts. Drag the video or detached
-subtitle box to move it and use the mouse wheel over a box to resize it. `Esc`/close saves
-the layout and returns directly to the game.
+Navigation is contextual:
 
-The `/mpv` control surface is fully custom-rendered: there are no vanilla buttons, sliders
-or popup dropdowns. It follows the two-column mock-up with Playback/Volume/Display on the
-left and Subtitles/Audio/Chapters plus Media Information on the right. The title bar is
-draggable, track/chapter lists scroll inside their own card, and the HUD information row is
-clickable to open the layout editor.
+- `/mpv` -> **Move UI** -> `Esc` / **Done** returns to the `/mpv` menu.
+- `/mpv hud` -> `Esc` / **Done** closes the editor and returns to gameplay.
 
+In the HUD editor, drag the video or a detached subtitle cue to move it and use the
+mouse wheel over it to resize. Moving a detached subtitle close to the horizontal
+centre shows a guide and enables persistent X-centering for future cues.
 
-## Web URLs
+## Bitmap subtitle architecture
 
-`/mpv play` accepts both direct media URLs and ordinary web-page URLs. Direct media such as
-`https://example.test/video.m3u8` or an MP4 is handed straight to libmpv. A normal page URL
-needs a resolver because the HTML page itself is not the video stream. MpvCraft enables
-mpv's built-in ytdl hook and looks for a recent `yt-dlp` executable in this order:
+mpv exposes text subtitle content through `sub-text`, but bitmap formats such as PGS
+do not have an equivalent public pixel API. MpvCraft therefore uses a second, muted
+libmpv core for supported **local** bitmap tracks. The helper renders the subtitle onto
+a transparent RGBA dummy video, then MpvCraft composites only the non-transparent cue
+bounds into Minecraft.
 
-1. JVM property `-Dmpvcraft.ytdlp=...`;
-2. `ytDlpPath` in `config/mpvcraft.json`;
-3. `.minecraft/yt-dlp(.exe)`, `.minecraft/tools/yt-dlp(.exe)`, or `.minecraft/mpvcraft/yt-dlp(.exe)`;
-4. the process `PATH`.
+The helper is intentionally capped to a small render canvas and a maximum update rate,
+so detached PGS does not behave like a second full-resolution video renderer. The main
+video remains decoded only by the primary core.
 
-If yt-dlp supports a page, mpv receives the resolved HLS/DASH/media streams and plays them
-without MpvCraft having to scrape the site itself. If the page is not supported by yt-dlp
-(or requires DRM/site-specific browser logic), `/mpv play <page-url>` cannot turn it into a
-stream automatically; use a direct media URL from a source you are authorized to access or
-add a dedicated resolver for that service.
+Web/ytdl sources currently keep bitmap subtitles attached because opening a second
+resolver/network session cannot reliably guarantee the same track topology.
 
-## Rendering architecture
+## Web URLs and yt-dlp
 
-Minecraft 26.x extracts GUI render states and composites them later, so MpvCraft uses a
-`PictureInPictureRenderer` bridge rather than issuing raw OpenGL from the HUD callback.
+Direct URLs such as `.m3u8`, `.mpd` or `.mp4` can be handed directly to libmpv. A normal
+webpage URL is HTML rather than a media stream, so it requires extraction. MpvCraft
+enables mpv's `ytdl_hook` and looks for `yt-dlp` in this order:
+
+1. JVM property `-Dmpvcraft.ytdlp=...`
+2. `ytDlpPath` in `config/mpvcraft.json`
+3. `.minecraft/yt-dlp(.exe)`, `.minecraft/tools/yt-dlp(.exe)`, or `.minecraft/mpvcraft/yt-dlp(.exe)`
+4. process `PATH`
+
+Sites unsupported by yt-dlp, DRM-protected sources, or sources requiring site-specific
+browser logic are not automatically resolved by MpvCraft.
+
+## Requirements
+
+- Minecraft `26.1.x`
+- Fabric Loader + Fabric API + Fabric Language Kotlin
+- JDK 25 for building
+- A compatible libmpv shared library at runtime
+
+### libmpv
+
+On Windows, make `mpv-2.dll` visible to Java or pass an explicit path:
 
 ```text
-libmpv (vo=libmpv, software decode by default)
-        |
-        | mpv_render_context_render()
-        v
-owned RGBA8 OpenGL FBO
-        |
-        | glBlitFramebuffer (GPU -> GPU)
-        v
-Minecraft PIP texture
-        |
-        v
-GUI compositor
+-Dmpvcraft.libmpv=C:\path\to\mpv-2.dll
 ```
 
-There is no frame copy through system RAM.
+On Linux/macOS, use the system libmpv package or the same JVM property with an explicit
+shared-library path.
 
-The video layout is stored in window-pixel coordinates so it stays visually stable when
-Minecraft GUI scale changes. Before a PIP render state is queued, that physical rectangle
-is transformed through the current GUI pose into final GUI coordinates. This avoids the
-old double application of `guiScale` that made a 840x472 HUD box allocate/render as
-1680x944 at GUI scale 2.
+## Build
 
-libmpv's OpenGL renderer is isolated with `GlStateGuard`: Minecraft state is saved,
-libmpv receives a near-default GL state, and the exact state is restored afterward.
-libmpv renders only when its update callback reports a new video/display frame; normal
-Minecraft frames only perform the final framebuffer blit.
+```bash
+./gradlew build
+```
 
-`mpv_render_context_render()` normally waits until the video's presentation timestamp,
-which can cap the caller's render loop to the video frame rate. MpvCraft disables that
-wait with `MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME=0` and `video-timing-offset=0`, so a
-24/30/60 fps video does not become Minecraft's FPS limiter.
-
-## Text / subtitles
-
-mpv uses UTF-8 for its client API. MpvCraft explicitly configures JNA for UTF-8 and also
-uses UTF-8 for native pointer reads and command arrays. This avoids Windows-default-codepage
-mojibake such as `Jâ€™ai` in subtitle text, media titles, track names and paths.
-
-mpv runs with `sub-visibility=no`. MpvCraft observes mpv's `sub-text` property and draws
-that text itself so subtitles can be detached from the video, scaled independently and
-optionally given a background.
-
-MpvCraft UI text and subtitles use Minecraft's bundled `minecraft:uniform` font resource.
-It has broad Unicode coverage (including accented Latin text) without shipping a separate
-third-party font file.
-
-## Setup
-
-1. Install a libmpv shared library.
-   - Windows: use a recent shinchiro build and make `mpv-2.dll` visible to Java, or pass
-     `-Dmpvcraft.libmpv=C:\\path\\to\\mpv-2.dll`.
-   - Linux/macOS: use the normal system libmpv package or pass an explicit library path.
-2. Use JDK 25.
-3. Build/run:
+On Windows:
 
 ```bat
-set JAVA_HOME=C:\Users\Nanako\AppData\Roaming\PrismLauncher\java\java-runtime-epsilon
-set PATH=%JAVA_HOME%\bin;%PATH%
-gradlew.bat runClient
+gradlew.bat build
 ```
 
-Optional libmpv debug log:
+The development client can be launched with `runClient`.
+
+## Configuration
+
+Runtime settings are stored in:
 
 ```text
--Dmpvcraft.mpvLog=run/mpv.log
+.minecraft/config/mpvcraft.json
 ```
 
-Fatal JVM native crashes are configured to write to `run/hs_err_%p.log` in the dev run.
+The config includes video position/size/opacity, subtitle layout, menu position, volume,
+video flip, hardware decoder choice and an optional explicit yt-dlp path.
 
-## Runtime notes
+## Rendering notes
 
-- Audio is owned by mpv and is not spatialized through Minecraft's audio mixer.
-- `hwdec=no` is the safe default for the Windows desktop-WGL integration. If software
-  decoding becomes a bottleneck, a copy-back decoder such as `d3d11va-copy` is safer to
-  experiment with than a direct GL/D3D interop path.
-- The video HUD is hidden with Minecraft's normal F1 GUI hide behavior.
+Minecraft's modern GUI pipeline extracts render state before compositing it. MpvCraft
+uses `PictureInPictureRenderer` bridges for both video and detached bitmap subtitles.
+libmpv renders into owned OpenGL FBOs and the result is copied GPU-to-GPU into the
+Minecraft PIP textures; video frames are not copied through system RAM.
 
-## Credits / licensing
+The video opacity control rewrites only the alpha channel of the PIP target after the GPU
+blit, so changing opacity does not trigger another libmpv render or a CPU-side frame copy.
+
+## License / credits
+
+MpvCraft is distributed under the BSD 3-Clause license. See [LICENSE](LICENSE).
 
 `MpvPipRenderer` and the drag/scroll HUD interaction are adapted from Odin by odtheking
-(BSD 3-Clause). Keep the attribution in `LICENSE` when redistributing.
+(BSD 3-Clause); attribution is retained in the source and license file.
 
-MpvCraft dynamically links to libmpv. libmpv is LGPL in a standard compatible build;
-do not bundle a GPL-configured mpv build unless your redistribution complies with it.
-
-### V5 UI controls
-
-`/mpv` opens the movable control panel. Use **Open file…** to choose local media without typing a command; `/mpv play <path-or-url>` is still useful for URLs. The panel uses a clean runtime system sans-serif instead of Minecraft's bitmap font.
-
-`/mpv hud` opens only the HUD layout editor. **Esc** or **Done** saves and closes it directly. When subtitles are detached, dragging them shows a vertical centre guide and snaps their horizontal centre to the middle of the screen when close enough; vertical positioning remains free.
-
-### V5.6 polished UI and bitmap subtitle detaching
-
-The custom `/mpv` surface now renders its own rounded controls and icons as anti-aliased high-density RGBA textures instead of approximating them with Minecraft's pixel-aligned GUI primitives. The screen remains fully custom/hit-tested, but its buttons, switches, cards and icons are intentionally styled like a normal media application rather than Minecraft widgets.
-
-For local media, **Detached Subs** also supports bitmap subtitle tracks such as Blu-ray PGS, DVD/VobSub, DVB subtitles and XSUB. MpvCraft opens a synchronized subtitle-only libmpv core with video disabled and composites its transparent RGBA subtitle surface through a separate PiP layer. This preserves the original bitmap artwork without OCR and without decoding the video twice. `/mpv hud` can move and scale this image-subtitle canvas independently.
-
-Web/ytdl sources continue to use native attached image subtitles: running a second resolver/network session cannot safely guarantee the same track topology. If the local libmpv build cannot render a transparent subtitle-only surface, MpvCraft automatically falls back to native attached image subtitles.
+MpvCraft dynamically links to libmpv. Ensure the mpv build you redistribute or use is
+licensed appropriately for your distribution.
