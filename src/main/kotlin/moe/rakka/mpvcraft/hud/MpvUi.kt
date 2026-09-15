@@ -7,27 +7,34 @@ import net.minecraft.client.renderer.texture.DynamicTexture
 import net.minecraft.network.chat.Component
 import net.minecraft.network.chat.MutableComponent
 import net.minecraft.resources.Identifier
+import java.awt.BasicStroke
 import java.awt.Color
 import java.awt.Font
 import java.awt.Graphics2D
 import java.awt.RenderingHints
 import java.awt.font.FontRenderContext
+import java.awt.geom.Arc2D
+import java.awt.geom.Ellipse2D
+import java.awt.geom.Path2D
+import java.awt.geom.RoundRectangle2D
 import java.awt.image.BufferedImage
 import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.ceil
+import kotlin.math.max
 
 /**
- * MpvCraft UI text renderer.
+ * MpvCraft UI rasterizer.
  *
- * Minecraft's bitmap/unifont faces are intentionally not used for MpvCraft's
- * own visual text.  Instead we rasterize a clean *system* sans-serif face at
- * runtime through Java's logical SansSerif composite face into small dynamic
- * textures. This keeps accents and broad Unicode fallback without redistributing a
- * font file with the mod.
+ * Minecraft's GUI primitives are pixel-aligned by design. That is ideal for the
+ * game, but it made MpvCraft's media controls look like Minecraft widgets even
+ * when they were fully custom. MpvCraft therefore rasterizes its own text,
+ * rounded surfaces and vector icons at the current GUI density with Java2D and
+ * lets Minecraft only composite the resulting RGBA textures.
  *
- * Components returned by [text] are still used for narration/chat/widget
- * plumbing; all visible MpvCraft UI labels are drawn through [draw].
+ * The result is deliberately closer to a normal desktop/media application:
+ * anti-aliased corners, round stroke caps, smooth icons and system sans-serif
+ * text, while still requiring no bundled font or icon assets.
  */
 object MpvUi {
     const val UI_SIZE = 12
@@ -35,13 +42,34 @@ object MpvUi {
     const val SECTION_SIZE = 10
     const val SUBTITLE_SIZE = 13
 
-    private const val TEXTURE_CACHE_LIMIT = 128
+    enum class Icon {
+        PLAY,
+        PAUSE,
+        REWIND_10,
+        FORWARD_10,
+        STOP,
+        SKIP,
+        FOLDER,
+        VOLUME,
+        DISPLAY,
+        SUBTITLES,
+        AUDIO,
+        CHAPTERS,
+        INFO,
+        LINK,
+        HEART,
+        CLOSE,
+    }
+
     private const val TEXTURE_PAD = 2
+    private const val TEXT_CACHE_LIMIT = 160
+    private const val SURFACE_CACHE_LIMIT = 192
+    private const val ICON_CACHE_LIMIT = 128
 
     private val frc = FontRenderContext(null, true, true)
     private val sequence = AtomicInteger()
 
-    private data class Key(
+    private data class TextKey(
         val text: String,
         val size: Int,
         val color: Int,
@@ -49,7 +77,24 @@ object MpvUi {
         val rasterScale: Int,
     )
 
-    private data class CachedText(
+    private data class SurfaceKey(
+        val width: Int,
+        val height: Int,
+        val radius: Int,
+        val fill: Int,
+        val border: Int?,
+        val borderWidthTenths: Int,
+        val rasterScale: Int,
+    )
+
+    private data class IconKey(
+        val icon: Icon,
+        val size: Int,
+        val color: Int,
+        val rasterScale: Int,
+    )
+
+    private data class CachedTexture(
         val textureId: Identifier,
         val textureWidth: Int,
         val textureHeight: Int,
@@ -58,30 +103,26 @@ object MpvUi {
         val drawPad: Int,
     )
 
-    private val cache = object : LinkedHashMap<Key, CachedText>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, CachedText>?): Boolean {
-            if (size <= TEXTURE_CACHE_LIMIT || eldest == null) return false
-            runCatching { MpvCraft.mc.getTextureManager().release(eldest.value.textureId) }
+    private fun <K> lru(limit: Int) = object : LinkedHashMap<K, CachedTexture>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, CachedTexture>?): Boolean {
+            if (size <= limit || eldest == null) return false
+            release(eldest.value)
             return true
         }
     }
 
-    /**
-     * Java's logical SansSerif is deliberately used instead of a single physical
-     * font family. On Windows it resolves to a normal UI sans face while Java can
-     * transparently fall back to other installed fonts for glyphs the primary
-     * face does not contain (CJK, Cyrillic, Arabic, etc.).
-     */
-    private val baseFont: Font by lazy {
-        Font(Font.SANS_SERIF, Font.PLAIN, UI_SIZE)
-    }
+    private val textCache = lru<TextKey>(TEXT_CACHE_LIMIT)
+    private val surfaceCache = lru<SurfaceKey>(SURFACE_CACHE_LIMIT)
+    private val iconCache = lru<IconKey>(ICON_CACHE_LIMIT)
+
+    /** Java logical SansSerif keeps the UI native-looking and Unicode capable. */
+    private val baseFont: Font by lazy { Font(Font.SANS_SERIF, Font.PLAIN, UI_SIZE) }
 
     fun text(value: String): MutableComponent = Component.literal(value)
 
     fun width(value: String, size: Int = UI_SIZE, bold: Boolean = false): Int {
         if (value.isEmpty()) return 0
-        val bounds = font(size, bold).getStringBounds(value, frc)
-        return ceil(bounds.width).toInt().coerceAtLeast(0)
+        return ceil(font(size, bold).getStringBounds(value, frc).width).toInt().coerceAtLeast(0)
     }
 
     fun lineHeight(size: Int = UI_SIZE, bold: Boolean = false): Int {
@@ -92,10 +133,8 @@ object MpvUi {
     fun clip(value: String, maxWidth: Int, size: Int = UI_SIZE, bold: Boolean = false): String {
         if (maxWidth <= 0) return ""
         if (width(value, size, bold) <= maxWidth) return value
-
         val ellipsis = "..."
         if (width(ellipsis, size, bold) > maxWidth) return ""
-
         var end = value.length
         while (end > 0) {
             val cp = value.codePointBefore(end)
@@ -115,35 +154,16 @@ object MpvUi {
         size: Int = UI_SIZE,
         bold: Boolean = false,
         physicalPixels: Boolean = false,
-        /** Extra raster density for text that will be enlarged by a pose transform. */
         qualityScale: Float = 1f,
     ) {
         if (value.isEmpty()) return
-        val requestedDensity = if (physicalPixels) {
-            qualityScale
-        } else {
-            uiRasterScale().toFloat() * qualityScale
-        }
+        val requestedDensity = if (physicalPixels) qualityScale else uiRasterScale().toFloat() * qualityScale
         val rasterScale = rasterScaleFor(requestedDensity)
-        val entry = textureFor(Key(value, size.coerceAtLeast(6), color, bold, rasterScale)) ?: run {
-            // Defensive fallback for unusual Java runtimes lacking java.desktop.
+        val entry = textTexture(TextKey(value, size.coerceAtLeast(6), color, bold, rasterScale)) ?: run {
             graphics.text(MpvCraft.mc.font, Component.literal(value), x, y, color, false)
             return
         }
-        graphics.blit(
-            RenderPipelines.GUI_TEXTURED,
-            entry.textureId,
-            x - entry.drawPad,
-            y - entry.drawPad,
-            0f,
-            0f,
-            entry.drawWidth,
-            entry.drawHeight,
-            entry.textureWidth,
-            entry.textureHeight,
-            entry.textureWidth,
-            entry.textureHeight,
-        )
+        blit(graphics, entry, x, y)
     }
 
     fun drawCentered(
@@ -170,81 +190,341 @@ object MpvUi {
         )
     }
 
-    /** Releases all dynamic glyph-line textures (also called on client shutdown). */
-    @Synchronized
-    fun clearCache() {
-        cache.values.forEach { runCatching { MpvCraft.mc.getTextureManager().release(it.textureId) } }
-        cache.clear()
+    /** Smooth, anti-aliased rounded surface with an optional real vector stroke. */
+    fun roundedRect(
+        graphics: GuiGraphicsExtractor,
+        x: Int,
+        y: Int,
+        width: Int,
+        height: Int,
+        radius: Int,
+        fill: Int,
+        border: Int? = null,
+        borderWidth: Float = 1f,
+        physicalPixels: Boolean = false,
+    ) {
+        if (width <= 0 || height <= 0) return
+        val density = if (physicalPixels) 2 else uiRasterScale()
+        val key = SurfaceKey(
+            width,
+            height,
+            radius.coerceIn(0, minOf(width, height) / 2),
+            fill,
+            border,
+            (borderWidth.coerceIn(0.5f, 4f) * 10f).toInt(),
+            density,
+        )
+        val entry = surfaceTexture(key) ?: run {
+            graphics.fill(x, y, x + width, y + height, fill)
+            return
+        }
+        blit(graphics, entry, x, y)
+    }
+
+    /** Anti-aliased vector icon; no Minecraft-font/pixel-glyph dependency. */
+    fun icon(
+        graphics: GuiGraphicsExtractor,
+        icon: Icon,
+        x: Int,
+        y: Int,
+        size: Int,
+        color: Int,
+        physicalPixels: Boolean = false,
+    ) {
+        if (size <= 0) return
+        val density = if (physicalPixels) 2 else uiRasterScale()
+        val entry = iconTexture(IconKey(icon, size, color, density)) ?: return
+        blit(graphics, entry, x, y)
     }
 
     @Synchronized
-    private fun textureFor(key: Key): CachedText? {
-        cache[key]?.let { return it }
+    fun clearCache() {
+        textCache.values.forEach(::release)
+        surfaceCache.values.forEach(::release)
+        iconCache.values.forEach(::release)
+        textCache.clear()
+        surfaceCache.clear()
+        iconCache.clear()
+    }
 
+    @Synchronized
+    private fun textTexture(key: TextKey): CachedTexture? {
+        textCache[key]?.let { return it }
         return try {
             val scale = key.rasterScale.coerceIn(1, 8)
             val awtFont = font(key.size * scale, key.bold)
             val lm = awtFont.getLineMetrics(key.text.ifEmpty { "Ag" }, frc)
             val textW = ceil(awtFont.getStringBounds(key.text, frc).width).toInt().coerceAtLeast(1)
             val textH = ceil(lm.height.toDouble()).toInt().coerceAtLeast(1)
-            val rasterPad = TEXTURE_PAD * scale
-            val width = textW + rasterPad * 2
-            val height = textH + rasterPad * 2
-
-            val buffered = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
-            val g = buffered.createGraphics()
-            try {
+            val pad = TEXTURE_PAD * scale
+            val buffered = BufferedImage(textW + pad * 2, textH + pad * 2, BufferedImage.TYPE_INT_ARGB)
+            buffered.createGraphics().useGraphics { g ->
                 configureGraphics(g)
                 g.font = awtFont
                 g.color = Color(key.color, true)
-                val baseline = rasterPad + ceil(lm.ascent.toDouble()).toInt()
-                g.drawString(key.text, rasterPad, baseline)
-            } finally {
-                g.dispose()
+                g.drawString(key.text, pad, pad + ceil(lm.ascent.toDouble()).toInt())
             }
-
-            val texture = DynamicTexture("MpvCraft system text", width, height, true)
-            val pixels = texture.getPixels()
-            for (py in 0 until height) {
-                for (px in 0 until width) {
-                    pixels.setPixel(px, py, buffered.getRGB(px, py))
-                }
-            }
-
-            val id = Identifier.fromNamespaceAndPath(
-                MpvCraft.MOD_ID,
-                "dynamic/system_text_${sequence.incrementAndGet()}",
-            )
-            MpvCraft.mc.getTextureManager().register(id, texture)
-            texture.upload()
-
-            CachedText(
-                textureId = id,
-                textureWidth = width,
-                textureHeight = height,
-                drawWidth = ceil(width / scale.toDouble()).toInt(),
-                drawHeight = ceil(height / scale.toDouble()).toInt(),
-                drawPad = TEXTURE_PAD,
-            ).also { cache[key] = it }
+            registerTexture(buffered, "system_text", scale, TEXTURE_PAD).also { textCache[key] = it }
         } catch (t: Throwable) {
             MpvCraft.logger.error("Failed to rasterize MpvCraft UI text", t)
             null
         }
     }
 
-    private fun uiRasterScale(): Int =
-        ceil(MpvCraft.mc.window.guiScale.toDouble()).toInt().coerceIn(1, 8)
+    @Synchronized
+    private fun surfaceTexture(key: SurfaceKey): CachedTexture? {
+        surfaceCache[key]?.let { return it }
+        return try {
+            val scale = key.rasterScale.coerceIn(1, 8)
+            val logicalPad = 2
+            val pad = logicalPad * scale
+            val rw = key.width * scale
+            val rh = key.height * scale
+            val rr = key.radius * scale.toDouble()
+            val image = BufferedImage(rw + pad * 2, rh + pad * 2, BufferedImage.TYPE_INT_ARGB)
+            image.createGraphics().useGraphics { g ->
+                configureGraphics(g)
+                val borderWidth = key.borderWidthTenths / 10f * scale
+                val inset = if (key.border != null) borderWidth / 2f else 0f
+                val shape = RoundRectangle2D.Float(
+                    pad + inset,
+                    pad + inset,
+                    rw - inset * 2,
+                    rh - inset * 2,
+                    max(0.0, rr * 2 - inset).toFloat(),
+                    max(0.0, rr * 2 - inset).toFloat(),
+                )
+                g.color = Color(key.fill, true)
+                g.fill(shape)
+                key.border?.let { border ->
+                    g.color = Color(border, true)
+                    g.stroke = BasicStroke(borderWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+                    g.draw(shape)
+                }
+            }
+            registerTexture(image, "surface", scale, logicalPad).also { surfaceCache[key] = it }
+        } catch (t: Throwable) {
+            MpvCraft.logger.error("Failed to rasterize MpvCraft UI surface", t)
+            null
+        }
+    }
 
-    private fun rasterScaleFor(requested: Float): Int =
-        ceil(requested.coerceAtLeast(1f).toDouble()).toInt().coerceIn(1, 8)
+    @Synchronized
+    private fun iconTexture(key: IconKey): CachedTexture? {
+        iconCache[key]?.let { return it }
+        return try {
+            val scale = key.rasterScale.coerceIn(1, 8)
+            val logicalPad = 2
+            val pad = logicalPad * scale
+            val s = key.size * scale
+            val image = BufferedImage(s + pad * 2, s + pad * 2, BufferedImage.TYPE_INT_ARGB)
+            image.createGraphics().useGraphics { g ->
+                configureGraphics(g)
+                g.translate(pad.toDouble(), pad.toDouble())
+                g.color = Color(key.color, true)
+                drawVectorIcon(g, key.icon, s.toDouble())
+            }
+            registerTexture(image, "icon", scale, logicalPad).also { iconCache[key] = it }
+        } catch (t: Throwable) {
+            MpvCraft.logger.error("Failed to rasterize MpvCraft vector icon ${key.icon}", t)
+            null
+        }
+    }
 
-    private fun font(size: Int, bold: Boolean): Font =
-        baseFont.deriveFont(if (bold) Font.BOLD else Font.PLAIN, size.toFloat())
+    private fun drawVectorIcon(g: Graphics2D, icon: Icon, size: Double) {
+        val u = size / 24.0
+        fun stroke(logical: Double = 1.8): BasicStroke = BasicStroke(
+            (logical * u).toFloat(),
+            BasicStroke.CAP_ROUND,
+            BasicStroke.JOIN_ROUND,
+        )
+        fun path(vararg points: Pair<Double, Double>, close: Boolean = false): Path2D.Double {
+            val p = Path2D.Double()
+            if (points.isEmpty()) return p
+            p.moveTo(points[0].first * u, points[0].second * u)
+            points.drop(1).forEach { p.lineTo(it.first * u, it.second * u) }
+            if (close) p.closePath()
+            return p
+        }
+        fun triangle(cx: Double, cy: Double, w: Double, h: Double) {
+            g.fill(path(
+                (cx - w / 2) to (cy - h / 2),
+                (cx + w / 2) to cy,
+                (cx - w / 2) to (cy + h / 2),
+                close = true,
+            ))
+        }
+
+        g.stroke = stroke()
+        when (icon) {
+            Icon.PLAY -> triangle(12.4, 12.0, 11.0, 14.0)
+            Icon.PAUSE -> {
+                g.fill(RoundRectangle2D.Double(7.1 * u, 5.0 * u, 3.4 * u, 14.0 * u, 1.6 * u, 1.6 * u))
+                g.fill(RoundRectangle2D.Double(13.5 * u, 5.0 * u, 3.4 * u, 14.0 * u, 1.6 * u, 1.6 * u))
+            }
+            Icon.REWIND_10, Icon.FORWARD_10 -> {
+                val forward = icon == Icon.FORWARD_10
+                val arc = if (forward) Arc2D.Double(4.0 * u, 3.3 * u, 16.0 * u, 16.0 * u, 62.0, -285.0, Arc2D.OPEN)
+                else Arc2D.Double(4.0 * u, 3.3 * u, 16.0 * u, 16.0 * u, 118.0, 285.0, Arc2D.OPEN)
+                g.stroke = stroke(1.6)
+                g.draw(arc)
+                val arrow = if (forward) path(18.6 to 4.2, 20.1 to 8.5, 15.8 to 7.8, close = true)
+                else path(5.4 to 4.2, 3.9 to 8.5, 8.2 to 7.8, close = true)
+                g.fill(arrow)
+                val f = baseFont.deriveFont(Font.BOLD, (7.2 * u).toFloat())
+                g.font = f
+                val fm = g.fontMetrics
+                val text = "10"
+                g.drawString(text, ((size - fm.stringWidth(text)) / 2.0).toFloat(), (14.7 * u).toFloat())
+            }
+            Icon.STOP -> g.fill(RoundRectangle2D.Double(6.2 * u, 6.2 * u, 11.6 * u, 11.6 * u, 2.6 * u, 2.6 * u))
+            Icon.SKIP -> {
+                triangle(8.5, 12.0, 7.0, 10.0)
+                triangle(14.3, 12.0, 7.0, 10.0)
+                g.stroke = stroke(2.0)
+                g.drawLine((19.0 * u).toInt(), (7.0 * u).toInt(), (19.0 * u).toInt(), (17.0 * u).toInt())
+            }
+            Icon.FOLDER -> {
+                val p = Path2D.Double()
+                p.moveTo(3.5 * u, 7.2 * u)
+                p.quadTo(3.5 * u, 5.5 * u, 5.2 * u, 5.5 * u)
+                p.lineTo(9.4 * u, 5.5 * u)
+                p.lineTo(11.2 * u, 7.6 * u)
+                p.lineTo(18.8 * u, 7.6 * u)
+                p.quadTo(20.5 * u, 7.6 * u, 20.5 * u, 9.3 * u)
+                p.lineTo(20.5 * u, 17.6 * u)
+                p.quadTo(20.5 * u, 19.0 * u, 19.0 * u, 19.0 * u)
+                p.lineTo(5.0 * u, 19.0 * u)
+                p.quadTo(3.5 * u, 19.0 * u, 3.5 * u, 17.5 * u)
+                p.closePath()
+                g.stroke = stroke(1.7)
+                g.draw(p)
+            }
+            Icon.VOLUME -> {
+                g.fill(path(3.0 to 10.0, 7.0 to 10.0, 11.0 to 6.5, 11.0 to 17.5, 7.0 to 14.0, 3.0 to 14.0, close = true))
+                g.stroke = stroke(1.5)
+                g.draw(Arc2D.Double(9.0 * u, 7.0 * u, 7.5 * u, 10.0 * u, -58.0, 116.0, Arc2D.OPEN))
+                g.draw(Arc2D.Double(9.0 * u, 4.5 * u, 12.0 * u, 15.0 * u, -54.0, 108.0, Arc2D.OPEN))
+            }
+            Icon.DISPLAY -> {
+                g.stroke = stroke(1.55)
+                g.draw(RoundRectangle2D.Double(3.5 * u, 4.5 * u, 17.0 * u, 12.0 * u, 2.2 * u, 2.2 * u))
+                g.drawLine((12 * u).toInt(), (16.8 * u).toInt(), (12 * u).toInt(), (19.1 * u).toInt())
+                g.drawLine((8.7 * u).toInt(), (19.3 * u).toInt(), (15.3 * u).toInt(), (19.3 * u).toInt())
+            }
+            Icon.SUBTITLES -> {
+                g.stroke = stroke(1.45)
+                g.draw(RoundRectangle2D.Double(3.2 * u, 4.5 * u, 17.6 * u, 13.5 * u, 2.6 * u, 2.6 * u))
+                g.drawLine((7 * u).toInt(), (10.2 * u).toInt(), (17 * u).toInt(), (10.2 * u).toInt())
+                g.drawLine((7 * u).toInt(), (13.5 * u).toInt(), (14.7 * u).toInt(), (13.5 * u).toInt())
+                g.drawLine((7.5 * u).toInt(), (18.0 * u).toInt(), (6.0 * u).toInt(), (20.0 * u).toInt())
+            }
+            Icon.AUDIO -> {
+                g.stroke = stroke(1.7)
+                g.drawLine((10.0 * u).toInt(), (6.0 * u).toInt(), (10.0 * u).toInt(), (16.2 * u).toInt())
+                g.drawLine((10.0 * u).toInt(), (6.0 * u).toInt(), (18.0 * u).toInt(), (4.3 * u).toInt())
+                g.drawLine((18.0 * u).toInt(), (4.3 * u).toInt(), (18.0 * u).toInt(), (14.3 * u).toInt())
+                g.fill(Ellipse2D.Double(5.2 * u, 14.1 * u, 5.7 * u, 4.6 * u))
+                g.fill(Ellipse2D.Double(13.2 * u, 12.2 * u, 5.7 * u, 4.6 * u))
+            }
+            Icon.CHAPTERS -> {
+                g.stroke = stroke(1.4)
+                for (i in 0..2) {
+                    val yy = (6.5 + i * 5.3) * u
+                    g.fill(Ellipse2D.Double(4.0 * u, yy - 1.1 * u, 2.2 * u, 2.2 * u))
+                    g.drawLine((8.2 * u).toInt(), yy.toInt(), (19.4 * u).toInt(), yy.toInt())
+                }
+            }
+            Icon.INFO -> {
+                g.stroke = stroke(1.4)
+                g.draw(Ellipse2D.Double(4.2 * u, 4.2 * u, 15.6 * u, 15.6 * u))
+                g.fill(Ellipse2D.Double(11.0 * u, 7.2 * u, 2.0 * u, 2.0 * u))
+                g.fill(RoundRectangle2D.Double(11.0 * u, 10.7 * u, 2.0 * u, 6.2 * u, 1.0 * u, 1.0 * u))
+            }
+            Icon.LINK -> {
+                g.stroke = stroke(1.5)
+                g.draw(Arc2D.Double(2.7 * u, 7.2 * u, 10.0 * u, 8.5 * u, 35.0, 250.0, Arc2D.OPEN))
+                g.draw(Arc2D.Double(11.3 * u, 7.2 * u, 10.0 * u, 8.5 * u, -145.0, 250.0, Arc2D.OPEN))
+                g.drawLine((8.3 * u).toInt(), (12.0 * u).toInt(), (15.7 * u).toInt(), (12.0 * u).toInt())
+            }
+            Icon.HEART -> {
+                val p = Path2D.Double()
+                p.moveTo(12.0 * u, 19.2 * u)
+                p.curveTo(10.0 * u, 17.3 * u, 4.2 * u, 13.8 * u, 4.2 * u, 8.9 * u)
+                p.curveTo(4.2 * u, 5.7 * u, 8.3 * u, 4.0 * u, 12.0 * u, 7.2 * u)
+                p.curveTo(15.7 * u, 4.0 * u, 19.8 * u, 5.7 * u, 19.8 * u, 8.9 * u)
+                p.curveTo(19.8 * u, 13.8 * u, 14.0 * u, 17.3 * u, 12.0 * u, 19.2 * u)
+                p.closePath()
+                g.fill(p)
+            }
+            Icon.CLOSE -> {
+                g.stroke = stroke(1.8)
+                g.drawLine((6.0 * u).toInt(), (6.0 * u).toInt(), (18.0 * u).toInt(), (18.0 * u).toInt())
+                g.drawLine((18.0 * u).toInt(), (6.0 * u).toInt(), (6.0 * u).toInt(), (18.0 * u).toInt())
+            }
+        }
+    }
+
+    private fun registerTexture(image: BufferedImage, prefix: String, rasterScale: Int, logicalPad: Int): CachedTexture {
+        val texture = DynamicTexture("MpvCraft $prefix", image.width, image.height, true)
+        val pixels = texture.getPixels()
+        for (py in 0 until image.height) {
+            for (px in 0 until image.width) pixels.setPixel(px, py, image.getRGB(px, py))
+        }
+        val id = Identifier.fromNamespaceAndPath(
+            MpvCraft.MOD_ID,
+            "dynamic/${prefix}_${sequence.incrementAndGet()}",
+        )
+        MpvCraft.mc.getTextureManager().register(id, texture)
+        texture.upload()
+        return CachedTexture(
+            textureId = id,
+            textureWidth = image.width,
+            textureHeight = image.height,
+            drawWidth = ceil(image.width / rasterScale.toDouble()).toInt(),
+            drawHeight = ceil(image.height / rasterScale.toDouble()).toInt(),
+            drawPad = logicalPad,
+        )
+    }
+
+    private fun blit(graphics: GuiGraphicsExtractor, entry: CachedTexture, x: Int, y: Int) {
+        graphics.blit(
+            RenderPipelines.GUI_TEXTURED,
+            entry.textureId,
+            x - entry.drawPad,
+            y - entry.drawPad,
+            0f,
+            0f,
+            entry.drawWidth,
+            entry.drawHeight,
+            entry.textureWidth,
+            entry.textureHeight,
+            entry.textureWidth,
+            entry.textureHeight,
+        )
+    }
+
+    private fun release(entry: CachedTexture) {
+        runCatching { MpvCraft.mc.getTextureManager().release(entry.textureId) }
+    }
+
+    private fun uiRasterScale(): Int = ceil(MpvCraft.mc.window.guiScale.toDouble()).toInt().coerceIn(2, 8)
+    private fun rasterScaleFor(requested: Float): Int = ceil(requested.coerceAtLeast(1f).toDouble()).toInt().coerceIn(1, 8)
+    private fun font(size: Int, bold: Boolean): Font = baseFont.deriveFont(if (bold) Font.BOLD else Font.PLAIN, size.toFloat())
 
     private fun configureGraphics(g: Graphics2D) {
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
         g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
         g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+        g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE)
         g.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, RenderingHints.VALUE_FRACTIONALMETRICS_ON)
+    }
+
+    private inline fun Graphics2D.useGraphics(block: (Graphics2D) -> Unit) {
+        try {
+            block(this)
+        } finally {
+            dispose()
+        }
     }
 }

@@ -4,6 +4,7 @@ import moe.rakka.mpvcraft.MpvCraft
 import moe.rakka.mpvcraft.MpvCraft.mc
 import moe.rakka.mpvcraft.mpv.MpvPlayer
 import moe.rakka.mpvcraft.render.MpvPipRenderer
+import moe.rakka.mpvcraft.render.MpvSubtitlePipRenderer
 import net.minecraft.client.DeltaTracker
 import net.minecraft.client.gui.GuiGraphicsExtractor
 
@@ -41,11 +42,13 @@ object MpvHud {
 
     fun draw(context: GuiGraphicsExtractor, editing: Boolean) {
         // FILE_LOADED/sid changes are handled lazily here on Minecraft's client
-        // thread. Bitmap subtitles then become part of mpv's rendered video; text
-        // subtitles remain in the movable MpvCraft HUD.
-        MpvPlayer.syncSubtitlePresentation(cfg.subEnabled)
+        // thread. Text subtitles stay in the MpvCraft HUD; supported local bitmap
+        // tracks can use the transparent subtitle-only libmpv layer as well.
+        MpvPlayer.syncSubtitlePresentation(cfg.subEnabled, cfg.subAttached)
         val showVideo = shouldShowVideo() || (editing && cfg.videoEnabled)
-        if (!showVideo && !(cfg.subEnabled && (editing || MpvPlayer.subtitle.isNotEmpty()))) return
+        val showDetachedImage = cfg.subEnabled && MpvPlayer.usesDetachedImageSubtitles
+        val showTextSub = cfg.subEnabled && !MpvPlayer.usesImageSubtitles && (editing || MpvPlayer.subtitle.isNotEmpty())
+        if (!showVideo && !showDetachedImage && !showTextSub) return
 
         context.pose().pushMatrix()
         val sf = mc.window.guiScale
@@ -89,7 +92,13 @@ object MpvHud {
     }
 
     private fun drawSubtitles(context: GuiGraphicsExtractor, editing: Boolean) {
-        if (!cfg.subEnabled || MpvPlayer.usesNativeImageSubtitles) return
+        if (!cfg.subEnabled) return
+
+        if (MpvPlayer.usesDetachedImageSubtitles) {
+            drawDetachedImageSubtitles(context, editing)
+            return
+        }
+        if (MpvPlayer.usesNativeImageSubtitles) return
 
         val text = MpvPlayer.subtitle.ifEmpty {
             if (editing) "Subtitles appear here" else return
@@ -114,8 +123,7 @@ object MpvHud {
             originY = cfg.videoY + videoHeight() - scaledH - (12 * scale).toInt()
         } else {
             // A centred detached subtitle is an anchor mode, not a one-time X
-            // coordinate.  The width of a subtitle changes every cue, so storing
-            // only the left edge made the following cue drift off-centre.
+            // coordinate. The width of a subtitle changes every cue.
             originX = if (cfg.subCenterX) {
                 mc.window.screenWidth / 2 - scaledW / 2
             } else {
@@ -153,6 +161,30 @@ object MpvHud {
         context.pose().popMatrix()
 
         if (editing && !cfg.subAttached) outline(context, subBox, subBox.contains(mouseX(), mouseY()))
+    }
+
+    /**
+     * PGS/VobSub/DVB/XSUB are rendered by a synchronized subtitle-only libmpv
+     * core into a full transparent canvas. The canvas is screen-centred by
+     * default so the bitmap keeps its authoring coordinates, but it can be moved
+     * and scaled independently from the video in /mpv hud.
+     */
+    private fun drawDetachedImageSubtitles(context: GuiGraphicsExtractor, editing: Boolean) {
+        val screenW = mc.window.screenWidth
+        val screenH = mc.window.screenHeight
+        val scale = cfg.imageSubScale.coerceIn(0.35f, 3f)
+        val canvasW = (screenW * scale).toInt().coerceAtLeast(1)
+        val canvasH = (screenH * scale).toInt().coerceAtLeast(1)
+        val originX = (screenW - canvasW) / 2 + cfg.imageSubOffsetX
+        val originY = (screenH - canvasH) / 2 + cfg.imageSubOffsetY
+
+        subBox.x = originX
+        subBox.y = originY
+        subBox.width = canvasW
+        subBox.height = canvasH
+
+        MpvSubtitlePipRenderer.draw(context, originX, originY, canvasW, canvasH)
+        if (editing) outline(context, subBox, subBox.contains(mouseX(), mouseY()))
     }
 
     private fun outline(context: GuiGraphicsExtractor, box: HudBox, hovered: Boolean) {

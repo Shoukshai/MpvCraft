@@ -5,8 +5,10 @@ import moe.rakka.mpvcraft.config.MpvConfig
 import moe.rakka.mpvcraft.hud.MpvHud
 import moe.rakka.mpvcraft.hud.MpvUi
 import moe.rakka.mpvcraft.input.MpvKeyMappings
+import moe.rakka.mpvcraft.mpv.MpvBitmapSubtitlePlayer
 import moe.rakka.mpvcraft.mpv.MpvPlayer
 import moe.rakka.mpvcraft.render.MpvPipRenderer
+import moe.rakka.mpvcraft.render.MpvSubtitlePipRenderer
 import net.fabricmc.api.ClientModInitializer
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
@@ -41,6 +43,9 @@ object MpvCraft : ClientModInitializer {
         PictureInPictureRendererRegistry.register { context ->
             MpvPipRenderer(context.bufferSource())
         }
+        PictureInPictureRendererRegistry.register { context ->
+            MpvSubtitlePipRenderer(context.bufferSource())
+        }
 
         HudElementRegistry.attachElementBefore(VanillaHudElements.SLEEP, HUD_LAYER, MpvHud::render)
 
@@ -55,6 +60,7 @@ object MpvCraft : ClientModInitializer {
         ClientLifecycleEvents.CLIENT_STOPPING.register {
             config.save()
             MpvUi.clearCache()
+            MpvBitmapSubtitlePlayer.shutdown()
             MpvPlayer.shutdown()
         }
 

@@ -27,6 +27,11 @@ data class MpvConfig(
     var subAttached: Boolean = true,
     var subBackground: Boolean = true,
     var subMaxWidth: Int = 720,
+    /** Scale of the full transparent canvas used by detached bitmap subtitles. */
+    var imageSubScale: Float = 1f,
+    /** Pixel offset from a screen-centred detached bitmap subtitle canvas. */
+    var imageSubOffsetX: Int = 0,
+    var imageSubOffsetY: Int = 0,
 
     var volume: Int = 80,
 
@@ -42,6 +47,11 @@ data class MpvConfig(
      * the safe one to try if software decoding is not keeping up.
      */
     var hwdec: String = "no",
+    /**
+     * Optional explicit yt-dlp executable. Leave blank to let MpvCraft/mpv search
+     * the game directory and PATH. Used only for ordinary web-page URL resolution.
+     */
+    var ytDlpPath: String = "",
 ) {
     fun save() {
         try {
@@ -59,8 +69,13 @@ data class MpvConfig(
         }
 
         fun load(): MpvConfig = try {
-            if (FILE.exists()) GSON.fromJson(FILE.readText(), MpvConfig::class.java) ?: MpvConfig()
+            val loaded = if (FILE.exists()) GSON.fromJson(FILE.readText(), MpvConfig::class.java) ?: MpvConfig()
             else MpvConfig()
+            // Migration guard for pre-V5.6 configs / Gson runtimes that may leave
+            // newly introduced primitive fields at zero rather than constructor defaults.
+            if (!loaded.imageSubScale.isFinite() || loaded.imageSubScale <= 0f) loaded.imageSubScale = 1f
+            loaded.imageSubScale = loaded.imageSubScale.coerceIn(0.35f, 3f)
+            loaded
         } catch (t: Throwable) {
             MpvCraft.logger.error("Could not read config, using defaults", t)
             MpvConfig()

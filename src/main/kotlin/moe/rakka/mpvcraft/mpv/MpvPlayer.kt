@@ -8,6 +8,7 @@ import moe.rakka.mpvcraft.MpvCraft
 import moe.rakka.mpvcraft.render.GlStateGuard
 import org.lwjgl.glfw.GLFW
 import org.lwjgl.opengl.GL33C
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -31,6 +32,8 @@ object MpvPlayer {
     @Volatile var available: Boolean = false; private set
     @Volatile var failureReason: String? = null; private set
     @Volatile var hasFile: Boolean = false; private set
+    /** Resolver executable selected for mpv's ytdl hook, if one was found. */
+    @Volatile var ytDlpExecutable: String? = null; private set
 
     /** Current subtitle line(s) as mpv would have drawn them. May contain '\n'. */
     @Volatile var subtitle: String = ""; private set
@@ -39,6 +42,7 @@ object MpvPlayer {
     @Volatile var videoHeight: Int = 0; private set
     @Volatile var paused: Boolean = false; private set
     @Volatile var title: String = ""; private set
+    @Volatile var currentSource: String? = null; private set
 
     enum class SubtitlePresentation {
         /** No subtitle track is currently selected. */
@@ -47,6 +51,8 @@ object MpvPlayer {
         DETACHED_TEXT,
         /** Bitmap subtitle (PGS/DVD/DVB/XSUB) rendered by mpv into the video frame. */
         NATIVE_IMAGE,
+        /** Bitmap subtitle rendered by a synchronized transparent secondary libmpv core. */
+        DETACHED_IMAGE,
     }
 
     @Volatile var subtitlePresentation: SubtitlePresentation = SubtitlePresentation.NONE
@@ -55,10 +61,19 @@ object MpvPlayer {
     val usesNativeImageSubtitles: Boolean
         get() = subtitlePresentation == SubtitlePresentation.NATIVE_IMAGE
 
+    val usesDetachedImageSubtitles: Boolean
+        get() = subtitlePresentation == SubtitlePresentation.DETACHED_IMAGE
+
+    val usesImageSubtitles: Boolean
+        get() = usesNativeImageSubtitles || usesDetachedImageSubtitles
+
     private val frameReady = AtomicBoolean(false)
     private val stopping = AtomicBoolean(false)
     private val subtitlePresentationDirty = AtomicBoolean(true)
     private var appliedNativeSubVisibility: Boolean? = null
+    private var appliedSubEnabled: Boolean? = null
+    private var appliedSubAttached: Boolean? = null
+    private var lastDetachedClockSyncNanos: Long = 0L
 
     /**
      * Native callbacks must stay strongly reachable for as long as libmpv can
@@ -129,6 +144,20 @@ object MpvPlayer {
         library.mpv_set_option_string(h, "keep-open", "yes")
         library.mpv_set_option_string(h, "osc", "no")
         library.mpv_set_option_string(h, "input-default-bindings", "no")
+
+        // Web-page URLs are not media streams by themselves. mpv's ytdl hook asks
+        // yt-dlp to resolve supported pages into the actual HLS/DASH/media URLs.
+        // Direct http(s) media URLs still bypass yt-dlp and are opened normally.
+        library.mpv_set_option_string(h, "ytdl", "yes")
+        library.mpv_set_option_string(h, "ytdl-format", "bestvideo+bestaudio/best")
+        ytDlpExecutable = locateYtDlp()
+        val ytdlScriptOptions = buildList {
+            add("ytdl_hook-try_ytdl_first=yes")
+            ytDlpExecutable?.let { add("ytdl_hook-ytdl_path=$it") }
+        }.joinToString(",")
+        library.mpv_set_option_string(h, "script-opts", ytdlScriptOptions)
+        ytDlpExecutable?.let { MpvCraft.logger.info("yt-dlp resolver: $it") }
+
         // Allow the UI/command volume control to use the requested 0..200% range.
         library.mpv_set_option_string(h, "volume-max", "200")
         // libmpv normally wakes the render callback ahead of the presentation time and
@@ -276,6 +305,13 @@ object MpvPlayer {
                     Mpv.EVENT_FILE_LOADED -> {
                         hasFile = true
                         subtitlePresentationDirty.set(true)
+                    }
+                    Mpv.EVENT_END_FILE -> {
+                        hasFile = false
+                        subtitle = ""
+                        subtitlePresentation = SubtitlePresentation.NONE
+                        subtitlePresentationDirty.set(true)
+                        MpvBitmapSubtitlePlayer.deactivate()
                     }
                     Mpv.EVENT_PROPERTY_CHANGE -> ev.data?.let { handleProperty(ev.reply_userdata, it) }
                 }
@@ -484,50 +520,103 @@ object MpvPlayer {
     /**
      * Keeps subtitle rendering on the correct path for the selected track.
      *
-     * mpv's `sub-text` property is intentionally empty for bitmap subtitles
-     * (Blu-ray PGS, DVD/VobSub, DVB, XSUB). Those cannot be reconstructed by
-     * MpvCraft's detached text HUD, so image subtitles are rendered natively by
-     * mpv into the video FBO. Text subtitles keep `sub-visibility=no` and remain
-     * independently movable through [subtitle].
+     * Text tracks are exposed through `sub-text` and drawn by MpvCraft. Bitmap
+     * tracks (PGS/VobSub/DVB/XSUB) have two paths:
+     *  - attached: mpv composites them into the primary video FBO;
+     *  - detached: a second synchronized libmpv core renders only the bitmap
+     *    subtitle layer to a transparent FBO, keeping the original PGS palette,
+     *    timing and placement without OCR or a second video decode.
      *
-     * This is cheap after the mode has settled: property queries only happen when
-     * FILE_LOADED/sid changes, or when the user toggles subtitle visibility.
+     * The detached image path is deliberately local-media first. Webpage URLs can
+     * resolve to different internal track ids on a second ytdl session, so image
+     * tracks on those sources safely stay attached instead of silently desyncing.
      */
-    fun syncSubtitlePresentation(enabled: Boolean, force: Boolean = false) {
+    fun syncSubtitlePresentation(enabled: Boolean, attached: Boolean, force: Boolean = false) {
         if (!available || !hasFile) {
             subtitlePresentation = SubtitlePresentation.NONE
+            MpvBitmapSubtitlePlayer.deactivate()
             return
         }
 
-        val enabledChanged = appliedNativeSubVisibility == null ||
-            (usesNativeImageSubtitles && appliedNativeSubVisibility != enabled)
-        if (!force && !subtitlePresentationDirty.get() && !enabledChanged) return
+        // A helper failure is discovered lazily from the render thread. Force one
+        // re-evaluation so the next frame falls back to native attached subtitles.
+        if (subtitlePresentation == SubtitlePresentation.DETACHED_IMAGE &&
+            !MpvBitmapSubtitlePlayer.canRenderCurrentSource
+        ) {
+            subtitlePresentationDirty.set(true)
+        }
+
+        val configChanged = appliedSubEnabled != enabled || appliedSubAttached != attached
+        if (!force && !subtitlePresentationDirty.get() && !configChanged) {
+            if (subtitlePresentation == SubtitlePresentation.DETACHED_IMAGE) syncDetachedImageClock()
+            return
+        }
         subtitlePresentationDirty.set(false)
+        appliedSubEnabled = enabled
+        appliedSubAttached = attached
 
         val codec = getProperty("current-tracks/sub/codec").orEmpty()
+        val sid = getProperty("current-tracks/sub/id")?.toIntOrNull()
+        val image = isImageSubtitleCodec(codec)
+        val source = currentSource
+        val externalSubtitle = selectedExternalSubtitleFilename()
+        val externalSupported = externalSubtitle == null || MpvBitmapSubtitlePlayer.supportsSource(externalSubtitle)
+        val detachedImageAllowed = image && !attached && enabled && sid != null &&
+            MpvBitmapSubtitlePlayer.supportsSource(source) && externalSupported &&
+            MpvBitmapSubtitlePlayer.canRenderCurrentSource
+
         subtitlePresentation = when {
             codec.isBlank() -> SubtitlePresentation.NONE
-            isImageSubtitleCodec(codec) -> SubtitlePresentation.NATIVE_IMAGE
+            image && detachedImageAllowed -> SubtitlePresentation.DETACHED_IMAGE
+            image -> SubtitlePresentation.NATIVE_IMAGE
             else -> SubtitlePresentation.DETACHED_TEXT
         }
 
-        // Only image subtitles are allowed into mpv's video output. Text tracks
-        // stay hidden there to avoid drawing them twice (mpv + our movable HUD).
+        if (subtitlePresentation == SubtitlePresentation.DETACHED_IMAGE) {
+            MpvBitmapSubtitlePlayer.configure(source, sid, enabled = true, externalSubtitle = externalSubtitle)
+            syncDetachedImageClock(force = true)
+        } else {
+            MpvBitmapSubtitlePlayer.deactivate()
+        }
+
+        // Only the native-image path enters the primary video output. Text and
+        // detached-image subtitles remain hidden there so they cannot be doubled.
         val nativeVisible = enabled && subtitlePresentation == SubtitlePresentation.NATIVE_IMAGE
-        if (appliedNativeSubVisibility != nativeVisible || force) {
+        if (appliedNativeSubVisibility != nativeVisible || force || configChanged) {
             setProperty("sub-visibility", if (nativeVisible) "yes" else "no")
             appliedNativeSubVisibility = nativeVisible
         }
 
-        if (subtitlePresentation == SubtitlePresentation.NATIVE_IMAGE) {
-            // sub-text is empty for these by definition; clear stale text from a
-            // previously selected text track immediately.
+        if (image) {
+            // sub-text is empty for image subtitles; remove stale text immediately.
             subtitle = ""
         }
     }
 
-    fun setSubtitlesEnabled(enabled: Boolean) {
-        syncSubtitlePresentation(enabled, force = true)
+    private fun selectedExternalSubtitleFilename(): String? {
+        val count = getProperty("track-list/count")?.toIntOrNull() ?: return null
+        for (i in 0 until count) {
+            if (getProperty("track-list/$i/type") != "sub") continue
+            if (getProperty("track-list/$i/selected") != "yes") continue
+            return getProperty("track-list/$i/external-filename")?.takeIf { it.isNotBlank() }
+        }
+        return null
+    }
+
+    private fun syncDetachedImageClock(force: Boolean = false) {
+        if (subtitlePresentation != SubtitlePresentation.DETACHED_IMAGE) return
+        val now = System.nanoTime()
+        if (!force && now - lastDetachedClockSyncNanos < 75_000_000L) return
+        lastDetachedClockSyncNanos = now
+
+        val time = getProperty("time-pos")?.toDoubleOrNull() ?: return
+        val speed = getProperty("speed")?.toDoubleOrNull() ?: 1.0
+        val delay = getProperty("sub-delay")?.toDoubleOrNull() ?: 0.0
+        MpvBitmapSubtitlePlayer.updateClock(time, paused, speed, delay)
+    }
+
+    fun setSubtitlesEnabled(enabled: Boolean, attached: Boolean) {
+        syncSubtitlePresentation(enabled, attached, force = true)
     }
 
     private fun isImageSubtitleCodec(codec: String): Boolean {
@@ -684,6 +773,14 @@ object MpvPlayer {
 
     fun load(path: String) {
         if (!init()) return
+        if (looksLikeWebPage(path) && ytDlpExecutable == null) {
+            MpvCraft.logger.warn(
+                "Opening a web-page URL without a detected yt-dlp executable. " +
+                    "Direct media URLs may still work, but page extraction will usually fail: $path"
+            )
+        }
+        MpvBitmapSubtitlePlayer.deactivate()
+        currentSource = path
         hasFile = false
         subtitle = ""
         subtitlePresentation = SubtitlePresentation.NONE
@@ -695,6 +792,8 @@ object MpvPlayer {
     fun togglePause() = command("cycle", "pause")
     fun stop() {
         command("stop")
+        MpvBitmapSubtitlePlayer.deactivate()
+        currentSource = null
         hasFile = false
         subtitle = ""
         subtitlePresentation = SubtitlePresentation.NONE
@@ -706,6 +805,54 @@ object MpvPlayer {
     fun cycleSubTrack() = command("cycle", "sid")
     fun cycleAudioTrack() = command("cycle", "aid")
     fun setVolume(v: Int) = setProperty("volume", v.coerceIn(0, 200).toString())
+
+
+    private fun locateYtDlp(): String? {
+        val configured = sequenceOf(
+            System.getProperty("mpvcraft.ytdlp"),
+            runCatching { MpvCraft.config.ytDlpPath }.getOrNull(),
+        ).mapNotNull { it?.trim()?.takeIf(String::isNotEmpty) }
+            .map(::File)
+            .firstOrNull { it.isFile }
+        if (configured != null) return configured.absolutePath
+
+        val names = if (System.getProperty("os.name").lowercase().contains("win")) {
+            listOf("yt-dlp.exe", "yt-dlp_x86.exe")
+        } else {
+            listOf("yt-dlp")
+        }
+
+        val gameDir = MpvCraft.mc.gameDirectory
+        val localCandidates = buildList {
+            names.forEach { name ->
+                add(File(gameDir, name))
+                add(File(gameDir, "tools/$name"))
+                add(File(gameDir, "mpvcraft/$name"))
+            }
+        }
+        localCandidates.firstOrNull { it.isFile }?.let { return it.absolutePath }
+
+        val path = System.getenv("PATH").orEmpty()
+        path.split(File.pathSeparatorChar).forEach { dir ->
+            if (dir.isBlank()) return@forEach
+            names.forEach { name ->
+                val candidate = File(dir, name)
+                if (candidate.isFile) return candidate.absolutePath
+            }
+        }
+        return null
+    }
+
+    private fun looksLikeWebPage(value: String): Boolean {
+        val lower = value.trim().lowercase()
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) return false
+        val clean = lower.substringBefore('?').substringBefore('#')
+        val direct = listOf(
+            ".m3u8", ".mpd", ".mp4", ".mkv", ".webm", ".mov", ".avi",
+            ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus",
+        )
+        return direct.none { clean.endsWith(it) }
+    }
 
     /** Aspect ratio of the loaded video, 16/9 as a fallback. */
     fun aspect(): Float =
@@ -773,11 +920,14 @@ object MpvPlayer {
         flipYMem = null
         blockForTargetTimeMem = null
         renderParams = null
+        currentSource = null
         hasFile = false
         subtitle = ""
         subtitlePresentation = SubtitlePresentation.NONE
         subtitlePresentationDirty.set(true)
         appliedNativeSubVisibility = null
+        appliedSubEnabled = null
+        appliedSubAttached = null
     }
 
     private fun hasOwningGlContext(): Boolean =
