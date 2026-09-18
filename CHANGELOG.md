@@ -1,34 +1,49 @@
 # Changelog
 
-All notable changes to **MpvCraft** will be documented in this file.
+All notable changes to **MpvCraft** are documented here.
 
-MpvCraft is currently in alpha. Features listed under **Unreleased / Upcoming** are planned and may change before release.
+## [0.1.0-alpha.2] - Unreleased
 
----
+Alpha 2 focuses on playback navigation and day-to-day media handling while keeping the existing libmpv rendering and detached subtitle architecture intact.
 
-## [Unreleased]
+### Added
 
-### Upcoming
+- Folder-backed playlists through **Open Media**.
+  - Select a file to play it directly.
+  - Select a folder to build a playlist from supported media files in that folder.
+- Playlist browser in the right-side tab area.
+- Playlist sorting by:
+  - file name
+  - modification date
+  - ascending or descending order
+- Optional automatic playback of the next playlist entry when the current file reaches natural EOF.
+- Previous / Next playlist controls.
+- Clickable and draggable playback timeline.
+- Chapter markers on the timeline when chapter metadata is available.
+- Manual external subtitle loading from the MpvCraft menu.
+- Minecraft key bindings under the **MpvCraft** controls category:
+  - Left Arrow: seek backward 5 seconds
+  - Right Arrow: seek forward 5 seconds
+  - K: Play / Pause
 
-- **Playlist support**
-  - Allow opening a folder as a playlist source.
-  - Automatically add supported media files from the selected folder.
-  - Sort playlist entries by:
-    - alphabetical order
-    - file date
-  - Navigate between playlist entries from the MpvCraft interface.
+### Changed
 
-- **Clickable timeline / seek bar**
-  - Add a playback timeline directly to the `/mpv` menu.
-  - Click anywhere on the timeline to seek to that position.
-  - Keep the timeline synchronized with the current playback position and media duration.
+- The left side of the `/mpv` menu is now independently scrollable.
+- The right-side browser is independently scrollable and remembers a separate scroll position for Subtitles, Audio, Chapters and Playlist.
+- `Open File` has been replaced by **Open Media**, with File / Folder selection.
+- Playback seek buttons now use 5-second jumps to match the default key bindings.
+- Media Information has moved from a permanent card to a retractable side drawer.
+- Playlist options are available directly from the left settings column.
 
-- **Manual subtitle loading**
-  - Add an option in the MpvCraft menu to manually load an external subtitle file.
-  - Allow adding subtitles even when the current media already contains embedded subtitle tracks.
-  - Make the newly added subtitle track available through the normal subtitle selector.
+### Still experimental
 
-- **JNI Integration (instead of jna)**
+- Detached bitmap / Blu-ray PGS subtitles.
+- Skip Intro / Skip OP chapter detection.
+
+### Planned after Alpha 2
+
+- Theme / color customization in a dedicated appearance screen.
+- Additional UI customization once the previous color-picker implementation is recovered and adapted.
 
 ---
 
@@ -60,43 +75,24 @@ First public alpha release of MpvCraft.
 - Optional subtitle background.
 - Experimental detached bitmap subtitle support, including Blu-ray PGS.
 - Cropped bitmap subtitle rendering to reduce unnecessary GPU compositing.
-- Independent positioning, scaling, and center snapping for detached bitmap subtitles.
+- Independent positioning, scaling and center snapping for detached bitmap subtitles.
 - Experimental Skip Intro / Skip OP support based on chapter metadata.
 - Context-aware HUD editor navigation:
   - `/mpv` -> `Move UI` -> `Esc` / `Done` returns to the MpvCraft menu.
   - `/mpv hud` -> `Esc` / `Done` returns directly to gameplay.
-- Windows, Linux, and macOS libmpv loading support.
-- Explicit libmpv path support through:
-
-  ```text
-  -Dmpvcraft.libmpv=/path/to/libmpv
-  ```
-
+- Windows, Linux and macOS libmpv loading support.
 - Optional yt-dlp path configuration and automatic lookup.
-- Config persistence for video, subtitle, HUD, volume, opacity, and playback-related settings.
-
-### Experimental
-
-The following features are functional but still considered experimental:
-
-- **Detached bitmap / Blu-ray PGS subtitles**
-- **Skip Intro / Skip OP**
-
-Detached bitmap subtitle compatibility may vary depending on the media file, subtitle codec, operating system, GPU/driver, and libmpv build.
-
-Skip Intro currently relies on chapter metadata and may select the wrong section when chapters are missing, unnamed, or structured differently.
+- Persistent video, subtitle, HUD, volume, opacity and playback settings.
 
 ### Known limitations
 
+- Detached bitmap subtitles are experimental and primarily intended for local media files.
+- Skip Intro / Skip OP is experimental.
 - Some unusual subtitle tracks may render incorrectly.
-- Detached bitmap subtitle support is primarily intended for local media files.
 - Webpage URL compatibility depends on mpv and yt-dlp.
 - DRM-protected media is not supported.
-- Some media files may expose unusual track or chapter metadata.
-- Performance and compatibility may vary depending on the operating system, GPU, drivers, and libmpv build.
-- libmpv is currently not bundled with MpvCraft and must be installed separately.
+- Performance and compatibility may vary by operating system, GPU, driver and libmpv build.
+- libmpv is not bundled with MpvCraft and must be installed separately.
 
----
-
-[Unreleased]: https://github.com/Shoukshai/MpvCraft/compare/v0.1.0-alpha.1...HEAD
+[0.1.0-alpha.2]: https://github.com/Shoukshai/MpvCraft/compare/v0.1.0-alpha.1...HEAD
 [0.1.0-alpha.1]: https://github.com/Shoukshai/MpvCraft/releases/tag/v0.1.0-alpha.1

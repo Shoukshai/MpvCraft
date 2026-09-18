@@ -4,7 +4,7 @@
 
 Play local videos or supported URLs in-game, move and resize the video independently from Minecraft's UI, select audio/subtitle tracks, browse chapters, and detach supported subtitles into their own HUD layer.
 
-> **Status:** `0.1.0-alpha.1` is an early public alpha. Core playback is usable, but some features are still experimental and may change.
+> **Status:** `0.1.0-alpha.2` is currently an unreleased development build. Core playback is usable, but some features are still experimental and may change.
 
 ## Screenshots
 
@@ -38,6 +38,11 @@ Play local videos or supported URLs in-game, move and resize the video independe
   - horizontal centre snapping
 - Experimental detached image subtitles, including Blu-ray PGS
 - Experimental **Skip Intro / Skip OP** based on chapter metadata
+- Folder-backed playlists with name/date sorting and optional auto-next
+- Clickable and draggable playback timeline with chapter markers
+- Manual external subtitle loading from the media menu
+- Independently scrollable settings and media-browser columns
+- Minecraft-remappable media key bindings
 
 ## Requirements
 
@@ -248,10 +253,11 @@ to open the MpvCraft control interface.
 The menu provides:
 
 - Play / Pause
-- Seek -10s / +10s
+- Seek -5s / +5s
 - Stop
 - Skip OP / Skip Intro
-- Open File
+- Open Media (file or folder)
+- Add external subtitle file
 - Volume
 - Video visibility
 - Subtitle visibility
@@ -262,6 +268,8 @@ The menu provides:
 - Subtitle track selection
 - Audio track selection
 - Chapter selection
+- Playlist browser, sorting and auto-next controls
+- Clickable playback timeline
 - HUD editor access
 
 ## HUD editor
@@ -289,6 +297,16 @@ Inside the HUD editor:
 - move a detached subtitle near the horizontal centre to enable persistent centre snapping
 
 Text and supported bitmap subtitles keep their horizontal centre alignment as subsequent subtitle cues change width.
+
+## Key bindings
+
+MpvCraft registers normal Minecraft key mappings, so every binding can be changed from Minecraft's Controls menu.
+
+Default Alpha 2 bindings:
+
+- **Left Arrow** - seek backward 5 seconds
+- **Right Arrow** - seek forward 5 seconds
+- **K** - Play / Pause
 
 ---
 
@@ -464,6 +482,8 @@ Current settings include:
 - vertical flip
 - mpv hardware decoder option
 - optional yt-dlp path
+- playlist sort mode and direction
+- playlist auto-next
 
 ## Hardware decoding
 
@@ -487,7 +507,7 @@ Compatibility depends on the system and GPU driver.
 
 # Current alpha limitations
 
-`0.1.0-alpha.1` is not a stable release.
+`0.1.0-alpha.2` is an unreleased alpha development build and is not a stable release.
 
 Known or expected limitations include:
 

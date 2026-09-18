@@ -7,6 +7,7 @@ import moe.rakka.mpvcraft.hud.MpvUi
 import moe.rakka.mpvcraft.input.MpvKeyMappings
 import moe.rakka.mpvcraft.mpv.MpvBitmapSubtitlePlayer
 import moe.rakka.mpvcraft.mpv.MpvPlayer
+import moe.rakka.mpvcraft.mpv.MpvPlaylist
 import moe.rakka.mpvcraft.render.MpvPipRenderer
 import moe.rakka.mpvcraft.render.MpvSubtitlePipRenderer
 import net.fabricmc.api.ClientModInitializer
@@ -49,9 +50,13 @@ object MpvCraft : ClientModInitializer {
 
         HudElementRegistry.attachElementBefore(VanillaHudElements.SLEEP, HUD_LAYER, MpvHud::render)
 
+        MpvPlaylist.initializeFromConfig()
         MpvCommand.register()
         MpvKeyMappings.register()
-        ClientTickEvents.END_CLIENT_TICK.register { MpvCommand.tick() }
+        ClientTickEvents.END_CLIENT_TICK.register {
+            MpvCommand.tick()
+            MpvPlaylist.tick()
+        }
 
         // libmpv is NOT initialized here. mpv_render_context_create needs the
         // OpenGL context to be current, and it wants a real window, so we defer

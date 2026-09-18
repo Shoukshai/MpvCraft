@@ -57,6 +57,11 @@ data class MpvConfig(
      * the game directory and PATH. Used only for ordinary web-page URL resolution.
      */
     var ytDlpPath: String = "",
+
+    // playlist defaults
+    var playlistSort: String = "name",
+    var playlistSortAscending: Boolean = true,
+    var playlistAutoNext: Boolean = true,
 ) {
     fun save() {
         try {
@@ -88,9 +93,16 @@ data class MpvConfig(
                 if (!root.has("imageSubScale") || !loaded.imageSubScale.isFinite() || loaded.imageSubScale <= 0f) {
                     loaded.imageSubScale = 1f
                 }
+                if (!root.has("playlistSort")) loaded.playlistSort = "name"
+                if (!root.has("playlistSortAscending")) loaded.playlistSortAscending = true
+                if (!root.has("playlistAutoNext")) loaded.playlistAutoNext = true
 
                 loaded.videoOpacity = loaded.videoOpacity.coerceIn(0f, 1f)
                 loaded.imageSubScale = loaded.imageSubScale.coerceIn(0.35f, 3f)
+                loaded.playlistSort = when (loaded.playlistSort.lowercase()) {
+                    "date", "date_modified" -> "date_modified"
+                    else -> "name"
+                }
                 loaded
             }
         } catch (t: Throwable) {

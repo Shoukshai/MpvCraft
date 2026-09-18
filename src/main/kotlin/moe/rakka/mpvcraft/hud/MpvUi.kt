@@ -34,7 +34,8 @@ import kotlin.math.max
  *
  * The result is deliberately closer to a normal desktop/media application:
  * anti-aliased corners, round stroke caps, smooth icons and system sans-serif
- * text, while still requiring no bundled font or icon assets.
+ * text. Seek icons use separate SVG-derived RGBA resources so their geometry
+ * and digit orientation are preserved without requiring a runtime SVG library.
  */
 object MpvUi {
     const val UI_SIZE = 12
@@ -45,11 +46,14 @@ object MpvUi {
     enum class Icon {
         PLAY,
         PAUSE,
-        REWIND_10,
-        FORWARD_10,
+        REWIND_5,
+        FORWARD_5,
         STOP,
+        PREVIOUS,
         SKIP,
         FOLDER,
+        FILE,
+        PLAYLIST,
         VOLUME,
         DISPLAY,
         SUBTITLES,
@@ -363,22 +367,18 @@ object MpvUi {
                 g.fill(RoundRectangle2D.Double(7.1 * u, 5.0 * u, 3.4 * u, 14.0 * u, 1.6 * u, 1.6 * u))
                 g.fill(RoundRectangle2D.Double(13.5 * u, 5.0 * u, 3.4 * u, 14.0 * u, 1.6 * u, 1.6 * u))
             }
-            Icon.REWIND_10, Icon.FORWARD_10 -> {
-                val forward = icon == Icon.FORWARD_10
-                val arc = if (forward) Arc2D.Double(4.0 * u, 3.3 * u, 16.0 * u, 16.0 * u, 62.0, -285.0, Arc2D.OPEN)
-                else Arc2D.Double(4.0 * u, 3.3 * u, 16.0 * u, 16.0 * u, 118.0, 285.0, Arc2D.OPEN)
-                g.stroke = stroke(1.6)
-                g.draw(arc)
-                val arrow = if (forward) path(18.6 to 4.2, 20.1 to 8.5, 15.8 to 7.8, close = true)
-                else path(5.4 to 4.2, 3.9 to 8.5, 8.2 to 7.8, close = true)
-                g.fill(arrow)
-                val f = baseFont.deriveFont(Font.BOLD, (7.2 * u).toFloat())
-                g.font = f
-                val fm = g.fontMetrics
-                val text = "10"
-                g.drawString(text, ((size - fm.stringWidth(text)) / 2.0).toFloat(), (14.7 * u).toFloat())
+            Icon.REWIND_5, Icon.FORWARD_5 -> {
+                val direction = if (icon == Icon.REWIND_5) MpvSeekIcons.Direction.REWIND else MpvSeekIcons.Direction.FORWARD
+                val image = MpvSeekIcons.rasterize(direction, size.toInt(), g.color.rgb)
+                g.drawImage(image, 0, 0, null)
             }
             Icon.STOP -> g.fill(RoundRectangle2D.Double(6.2 * u, 6.2 * u, 11.6 * u, 11.6 * u, 2.6 * u, 2.6 * u))
+            Icon.PREVIOUS -> {
+                triangle(15.5, 12.0, -7.0, 10.0)
+                triangle(9.7, 12.0, -7.0, 10.0)
+                g.stroke = stroke(2.0)
+                g.drawLine((5.0 * u).toInt(), (7.0 * u).toInt(), (5.0 * u).toInt(), (17.0 * u).toInt())
+            }
             Icon.SKIP -> {
                 triangle(8.5, 12.0, 7.0, 10.0)
                 triangle(14.3, 12.0, 7.0, 10.0)
@@ -400,6 +400,29 @@ object MpvUi {
                 p.closePath()
                 g.stroke = stroke(1.7)
                 g.draw(p)
+            }
+            Icon.FILE -> {
+                g.stroke = stroke(1.55)
+                val p = Path2D.Double()
+                p.moveTo(6.2 * u, 4.2 * u)
+                p.lineTo(13.9 * u, 4.2 * u)
+                p.lineTo(18.2 * u, 8.5 * u)
+                p.lineTo(18.2 * u, 19.2 * u)
+                p.lineTo(6.2 * u, 19.2 * u)
+                p.closePath()
+                g.draw(p)
+                g.drawLine((13.9 * u).toInt(), (4.2 * u).toInt(), (13.9 * u).toInt(), (8.5 * u).toInt())
+                g.drawLine((13.9 * u).toInt(), (8.5 * u).toInt(), (18.2 * u).toInt(), (8.5 * u).toInt())
+                g.drawLine((8.5 * u).toInt(), (11.3 * u).toInt(), (15.8 * u).toInt(), (11.3 * u).toInt())
+                g.drawLine((8.5 * u).toInt(), (14.5 * u).toInt(), (14.1 * u).toInt(), (14.5 * u).toInt())
+            }
+            Icon.PLAYLIST -> {
+                g.stroke = stroke(1.45)
+                for (i in 0..2) {
+                    val y = (6.8 + i * 4.7) * u
+                    g.drawLine((7.0 * u).toInt(), y.toInt(), (18.4 * u).toInt(), y.toInt())
+                    g.fill(RoundRectangle2D.Double(3.8 * u, y - 1.1 * u, 1.8 * u, 1.8 * u, 0.8 * u, 0.8 * u))
+                }
             }
             Icon.VOLUME -> {
                 g.fill(path(3.0 to 10.0, 7.0 to 10.0, 11.0 to 6.5, 11.0 to 17.5, 7.0 to 14.0, 3.0 to 14.0, close = true))

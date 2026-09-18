@@ -132,6 +132,7 @@ open class MpvEventProperty(p: Pointer) : Structure(p) {
     @JvmField var data: Pointer? = null
 }
 
+
 // ---- constants ----------------------------------------------------------
 
 object Mpv {
@@ -172,4 +173,7 @@ object Mpv {
     const val OBS_TITLE = 5L
     /** Selected subtitle track id (sid); used to refresh text/native subtitle mode. */
     const val OBS_SID = 6L
+    const val OBS_TIME_POS = 7L
+    const val OBS_DURATION = 8L
+    const val OBS_EOF_REACHED = 9L
 }

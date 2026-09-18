@@ -11,6 +11,7 @@ import moe.rakka.mpvcraft.hud.MpvHudScreen
 import moe.rakka.mpvcraft.hud.MpvMenuScreen
 import moe.rakka.mpvcraft.hud.MpvUi
 import moe.rakka.mpvcraft.mpv.MpvPlayer
+import moe.rakka.mpvcraft.mpv.MpvPlaylist
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource
 
@@ -53,6 +54,7 @@ object MpvCommand {
                                 if (!MpvPlayer.init()) {
                                     say("libmpv could not be loaded: ${MpvPlayer.failureReason}")
                                 } else {
+                                    MpvPlaylist.clear()
                                     MpvPlayer.load(path)
                                     MpvPlayer.setVolume(MpvCraft.config.volume)
                                     say("Playing $path")
@@ -89,8 +91,8 @@ object MpvCommand {
                         lit("sub").then(
                             arg("file", StringArgumentType.greedyString()).executes { ctx ->
                                 val f = StringArgumentType.getString(ctx, "file").trim().trim('"')
-                                MpvPlayer.command("sub-add", f, "select")
-                                say("Loaded subtitle file")
+                                if (MpvPlayer.addSubtitle(f)) say("Loaded subtitle file")
+                                else say("Could not load subtitle file")
                                 1
                             }
                         )

@@ -10,6 +10,7 @@ import org.lwjgl.glfw.GLFW
 import org.lwjgl.opengl.GL33C
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Owns the libmpv handle and its OpenGL render context.
@@ -43,6 +44,13 @@ object MpvPlayer {
     @Volatile var paused: Boolean = false; private set
     @Volatile var title: String = ""; private set
     @Volatile var currentSource: String? = null; private set
+    @Volatile var positionSeconds: Double = 0.0; private set
+    @Volatile var durationSeconds: Double = 0.0; private set
+    @Volatile private var eofReached: Boolean = false
+
+    private val naturalEndCounter = AtomicLong(0L)
+    val naturalEndSerial: Long
+        get() = naturalEndCounter.get()
 
     enum class SubtitlePresentation {
         /** No subtitle track is currently selected. */
@@ -216,6 +224,9 @@ object MpvPlayer {
         library.mpv_observe_property(h, Mpv.OBS_PAUSE, "pause", Mpv.FORMAT_FLAG)
         library.mpv_observe_property(h, Mpv.OBS_TITLE, "media-title", Mpv.FORMAT_STRING)
         library.mpv_observe_property(h, Mpv.OBS_SID, "sid", Mpv.FORMAT_STRING)
+        library.mpv_observe_property(h, Mpv.OBS_TIME_POS, "time-pos", Mpv.FORMAT_DOUBLE)
+        library.mpv_observe_property(h, Mpv.OBS_DURATION, "duration", Mpv.FORMAT_DOUBLE)
+        library.mpv_observe_property(h, Mpv.OBS_EOF_REACHED, "eof-reached", Mpv.FORMAT_FLAG)
 
         stopping.set(false)
         startEventLoop(library, h)
@@ -307,7 +318,10 @@ object MpvPlayer {
                         subtitlePresentationDirty.set(true)
                     }
                     Mpv.EVENT_END_FILE -> {
+                        eofReached = false
                         hasFile = false
+                        positionSeconds = 0.0
+                        durationSeconds = 0.0
                         subtitle = ""
                         subtitlePresentation = SubtitlePresentation.NONE
                         subtitlePresentationDirty.set(true)
@@ -327,6 +341,7 @@ object MpvPlayer {
         val d = prop.data ?: run {
             // property became unavailable
             if (id == Mpv.OBS_SUB_TEXT) subtitle = ""
+            if (id == Mpv.OBS_EOF_REACHED) eofReached = false
             return
         }
         when (prop.format) {
@@ -354,7 +369,21 @@ object MpvPlayer {
             }
             Mpv.FORMAT_FLAG -> {
                 val v = d.getInt(0) != 0
-                if (id == Mpv.OBS_PAUSE) paused = v
+                when (id) {
+                    Mpv.OBS_PAUSE -> paused = v
+                    Mpv.OBS_EOF_REACHED -> {
+                        val wasReached = eofReached
+                        eofReached = v
+                        if (v && !wasReached) naturalEndCounter.incrementAndGet()
+                    }
+                }
+            }
+            Mpv.FORMAT_DOUBLE -> {
+                val v = d.getDouble(0)
+                when (id) {
+                    Mpv.OBS_TIME_POS -> positionSeconds = if (v.isFinite()) v.coerceAtLeast(0.0) else 0.0
+                    Mpv.OBS_DURATION -> durationSeconds = if (v.isFinite()) v.coerceAtLeast(0.0) else 0.0
+                }
             }
         }
     }
@@ -504,10 +533,10 @@ object MpvPlayer {
 
     // -------------------------------------------------------------------
 
-    fun command(vararg args: String) {
-        val lib = lib ?: return
-        val h = handle ?: return
-        lib.mpv_command(h, StringArray(args, MPV_STRING_ENCODING))
+    fun command(vararg args: String): Int {
+        val lib = lib ?: return -1
+        val h = handle ?: return -1
+        return lib.mpv_command(h, StringArray(args, MPV_STRING_ENCODING))
     }
 
     /**
@@ -813,6 +842,9 @@ object MpvPlayer {
         MpvBitmapSubtitlePlayer.deactivate()
         currentSource = path
         hasFile = false
+        positionSeconds = 0.0
+        durationSeconds = 0.0
+        eofReached = false
         subtitle = ""
         subtitlePresentation = SubtitlePresentation.NONE
         subtitlePresentationDirty.set(true)
@@ -826,6 +858,9 @@ object MpvPlayer {
         MpvBitmapSubtitlePlayer.deactivate()
         currentSource = null
         hasFile = false
+        positionSeconds = 0.0
+        durationSeconds = 0.0
+        eofReached = false
         subtitle = ""
         subtitlePresentation = SubtitlePresentation.NONE
         subtitlePresentationDirty.set(true)
@@ -833,6 +868,18 @@ object MpvPlayer {
     }
 
     fun seek(seconds: Int) = command("seek", seconds.toString(), "relative")
+    fun seekAbsolute(seconds: Double) {
+        val duration = durationSeconds
+        val target = if (duration > 0.0) seconds.coerceIn(0.0, duration) else seconds.coerceAtLeast(0.0)
+        command("seek", "%.3f".format(java.util.Locale.ROOT, target), "absolute+exact")
+    }
+
+    fun addSubtitle(path: String): Boolean {
+        val rc = command("sub-add", path, "select")
+        if (rc >= 0) subtitlePresentationDirty.set(true)
+        return rc >= 0
+    }
+
     fun cycleSubTrack() = command("cycle", "sid")
     fun cycleAudioTrack() = command("cycle", "aid")
     fun setVolume(v: Int) = setProperty("volume", v.coerceIn(0, 200).toString())
@@ -953,6 +1000,9 @@ object MpvPlayer {
         renderParams = null
         currentSource = null
         hasFile = false
+        positionSeconds = 0.0
+        durationSeconds = 0.0
+        eofReached = false
         subtitle = ""
         subtitlePresentation = SubtitlePresentation.NONE
         subtitlePresentationDirty.set(true)

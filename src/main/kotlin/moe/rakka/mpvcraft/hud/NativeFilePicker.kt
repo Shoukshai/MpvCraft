@@ -4,35 +4,65 @@ import java.io.File
 import java.io.IOException
 import java.util.Locale
 
-/**
- * Native-ish file picker without AWT/Swing.
- *
- * Minecraft starts Java in headless mode on several launchers, so AWT
- * FileDialog/JFileChooser throws HeadlessException even though a desktop is
- * clearly present.  Use the OS dialog helpers instead.  The call is blocking
- * and must therefore be made from a worker thread.
- */
 object NativeFilePicker {
 
-    fun chooseMedia(initialDirectory: File?): File? {
-        val os = System.getProperty("os.name", "").lowercase(Locale.ROOT)
+    fun chooseMediaFile(initialDirectory: File?): File? {
+        val os = osName()
         return when {
-            os.contains("win") -> chooseWindows(initialDirectory)
-            os.contains("mac") || os.contains("darwin") -> chooseMac()
-            else -> chooseLinux(initialDirectory)
+            os.startsWith("windows") -> chooseWindowsFile(
+                initialDirectory,
+                "Open media",
+                "Media files|*.mkv;*.mp4;*.webm;*.avi;*.mov;*.m4v;*.ts;*.m2ts;*.flv;*.wmv;*.mp3;*.flac;*.ogg;*.wav;*.m4a;*.aac;*.opus|All files|*.*",
+            )
+            os.contains("mac") || os.contains("darwin") -> chooseMacFile("Open media")
+            else -> chooseLinuxFile(
+                initialDirectory,
+                "Open media",
+                "Media files (*.mkv *.mp4 *.webm *.avi *.mov *.m4v *.ts *.m2ts *.flv *.wmv *.mp3 *.flac *.ogg *.wav *.m4a *.aac *.opus);;All files (*)",
+            )
         }
     }
 
-    private fun chooseWindows(initialDirectory: File?): File? {
+    fun chooseMediaFolder(initialDirectory: File?): File? {
+        val os = osName()
+        return when {
+            os.startsWith("windows") -> chooseWindowsFolder(initialDirectory)
+            os.contains("mac") || os.contains("darwin") -> chooseMacFolder()
+            else -> chooseLinuxFolder(initialDirectory)
+        }
+    }
+
+    fun chooseSubtitle(initialDirectory: File?): File? {
+        val os = osName()
+        return when {
+            os.startsWith("windows") -> chooseWindowsFile(
+                initialDirectory,
+                "Add subtitle",
+                "Subtitle files|*.srt;*.ass;*.ssa;*.vtt;*.sub;*.sup|All files|*.*",
+            )
+            os.contains("mac") || os.contains("darwin") -> chooseMacFile("Add subtitle")
+            else -> chooseLinuxFile(
+                initialDirectory,
+                "Add subtitle",
+                "Subtitle files (*.srt *.ass *.ssa *.vtt *.sub *.sup);;All files (*)",
+            )
+        }
+    }
+
+    fun chooseMedia(initialDirectory: File?): File? = chooseMediaFile(initialDirectory)
+
+    private fun osName(): String = System.getProperty("os.name", "").lowercase(Locale.ROOT)
+
+    private fun chooseWindowsFile(initialDirectory: File?, title: String, filter: String): File? {
         val script = """
             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(${ '$' }false)
             Add-Type -AssemblyName System.Windows.Forms
             ${ '$' }dialog = New-Object System.Windows.Forms.OpenFileDialog
-            ${ '$' }dialog.Title = 'Open media'
+            ${ '$' }dialog.Title = ${psQuote(title)}
             ${ '$' }dialog.Multiselect = ${ '$' }false
             ${ '$' }dialog.RestoreDirectory = ${ '$' }true
             ${ '$' }dialog.CheckFileExists = ${ '$' }true
-            ${ '$' }dialog.Filter = 'Media files|*.mkv;*.mp4;*.webm;*.avi;*.mov;*.m4v;*.ts;*.m2ts;*.flv;*.wmv;*.mp3;*.flac;*.ogg;*.wav;*.m4a|All files|*.*'
+            ${ '$' }dialog.Filter = ${psQuote(filter)}
             ${ '$' }start = ${ '$' }env:MPVCRAFT_PICKER_DIR
             if (${ '$' }start -and [System.IO.Directory]::Exists(${ '$' }start)) {
                 ${ '$' }dialog.InitialDirectory = ${ '$' }start
@@ -42,7 +72,29 @@ object NativeFilePicker {
             }
             ${ '$' }dialog.Dispose()
         """.trimIndent()
+        return runWindows(script, initialDirectory)
+    }
 
+    private fun chooseWindowsFolder(initialDirectory: File?): File? {
+        val script = """
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(${ '$' }false)
+            Add-Type -AssemblyName System.Windows.Forms
+            ${ '$' }dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+            ${ '$' }dialog.Description = 'Open media folder'
+            ${ '$' }dialog.ShowNewFolderButton = ${ '$' }false
+            ${ '$' }start = ${ '$' }env:MPVCRAFT_PICKER_DIR
+            if (${ '$' }start -and [System.IO.Directory]::Exists(${ '$' }start)) {
+                ${ '$' }dialog.SelectedPath = ${ '$' }start
+            }
+            if (${ '$' }dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                [Console]::Write(${ '$' }dialog.SelectedPath)
+            }
+            ${ '$' }dialog.Dispose()
+        """.trimIndent()
+        return runWindows(script, initialDirectory)
+    }
+
+    private fun runWindows(script: String, initialDirectory: File?): File? {
         var lastError: IOException? = null
         for (exe in listOf("powershell.exe", "pwsh.exe")) {
             try {
@@ -68,12 +120,25 @@ object NativeFilePicker {
         throw IOException("PowerShell is unavailable", lastError)
     }
 
-    private fun chooseMac(): File? {
+    private fun chooseMacFile(title: String): File? {
         val pb = ProcessBuilder(
             "osascript",
             "-e",
-            "POSIX path of (choose file with prompt \"Open media\")",
+            "POSIX path of (choose file with prompt \"${title.replace("\"", "\\\"")}\")",
         )
+        return runMacPicker(pb)
+    }
+
+    private fun chooseMacFolder(): File? {
+        val pb = ProcessBuilder(
+            "osascript",
+            "-e",
+            "POSIX path of (choose folder with prompt \"Open media folder\")",
+        )
+        return runMacPicker(pb)
+    }
+
+    private fun runMacPicker(pb: ProcessBuilder): File? {
         val process = try {
             pb.start()
         } catch (e: IOException) {
@@ -84,17 +149,17 @@ object NativeFilePicker {
         val exit = process.waitFor()
         if (exit == 0) return stdout.takeIf { it.isNotBlank() }?.let(::File)
         if (stderr.contains("User canceled", ignoreCase = true) || stderr.contains("-128")) return null
-        throw IOException(stderr.ifBlank { "macOS file picker exited with code $exit" })
+        throw IOException(stderr.ifBlank { "macOS picker exited with code $exit" })
     }
 
-    private fun chooseLinux(initialDirectory: File?): File? {
+    private fun chooseLinuxFile(initialDirectory: File?, title: String, kdialogFilter: String): File? {
         val start = initialDirectory?.takeIf { it.isDirectory }?.absolutePath
         val candidates = buildList {
             add(
                 ProcessBuilder(
                     "zenity",
                     "--file-selection",
-                    "--title=Open media",
+                    "--title=$title",
                     *(if (start != null) arrayOf("--filename=${start}${File.separator}") else emptyArray()),
                 )
             )
@@ -103,11 +168,30 @@ object NativeFilePicker {
                     "kdialog",
                     "--getopenfilename",
                     start ?: System.getProperty("user.home", "."),
-                    "Media files (*.mkv *.mp4 *.webm *.avi *.mov *.m4v *.ts *.m2ts *.flv *.wmv *.mp3 *.flac *.ogg *.wav *.m4a);;All files (*)",
+                    kdialogFilter,
                 )
             )
         }
+        return runLinuxCandidates(candidates)
+    }
 
+    private fun chooseLinuxFolder(initialDirectory: File?): File? {
+        val start = initialDirectory?.takeIf { it.isDirectory }?.absolutePath
+            ?: System.getProperty("user.home", ".")
+        val candidates = listOf(
+            ProcessBuilder(
+                "zenity",
+                "--file-selection",
+                "--directory",
+                "--title=Open media folder",
+                "--filename=${start}${File.separator}",
+            ),
+            ProcessBuilder("kdialog", "--getexistingdirectory", start),
+        )
+        return runLinuxCandidates(candidates)
+    }
+
+    private fun runLinuxCandidates(candidates: List<ProcessBuilder>): File? {
         var lastError: IOException? = null
         for (pb in candidates) {
             try {
@@ -129,4 +213,6 @@ object NativeFilePicker {
         if (exit in cancelExitCodes && stdout.isBlank()) return null
         throw IOException(stderr.ifBlank { "File picker exited with code $exit" })
     }
+
+    private fun psQuote(value: String): String = "'${value.replace("'", "''")}'"
 }
